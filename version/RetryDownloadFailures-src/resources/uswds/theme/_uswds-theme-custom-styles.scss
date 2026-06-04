@@ -1,0 +1,52 @@
+/*
+* * * * * ==============================
+* * * * * ==============================
+* * * * * ==============================
+* * * * * ==============================
+========================================
+========================================
+========================================
+----------------------------------------
+USWDS THEME CUSTOM STYLES
+----------------------------------------
+!! Copy this file to your project's
+   sass root. Don't edit the version
+   in node_modules.
+----------------------------------------
+Custom project SASS goes here.
+
+i.e.
+@include u-padding-right('05');
+----------------------------------------
+*/
+
+@use "uswds-core" as *;
+@forward "../../css/bootstrap.min.scss";
+@forward "../../css/ssurgo_portal_style.scss";
+
+.usa-alert, .usa-alert--slim {
+   width: 100%;
+
+   .usa-alert__body {
+       margin: 0;
+   }
+
+   h4 {
+       font-size: 1.25rem;
+       font-weight: 700;
+   }
+}
+
+.usa-accordion__button {
+    padding-right: 3rem !important;
+}
+
+.usa-combo-box__select, .usa-combo-box > span:last-of-type {
+    //For some reason, when importing the combo box package, these items are not hidden.    
+    display: none;
+}
+
+.usa-sr-only{
+    position: absolute;
+    top: -30em;
+}

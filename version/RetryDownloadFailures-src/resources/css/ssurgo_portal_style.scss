@@ -1,0 +1,1810 @@
+@charset "UTF-8";
+@use "uswds-core" as *;
+/*******************
+    TABLE OF CONTENT
+    ----------------
+    1. GENERAL
+    2. HOME PAGE
+        2.1 TABLE STYLING
+    3. HELP PANE
+    4. TREE VIEW
+    5. SDV
+    6. LANDING PAGE
+    7. MAP PAGE
+    8. RESPONSIVE SCREENS
+
+Items to address:
+
+*******************/
+
+/********* 1. GENERAL *********/
+html,
+html>*,
+body>* {
+    height: 100%;
+    font-family: 'Source Sans Pro Web', 'Helvetica Neue','Helvetica','Roboto',Arial,sans-serif;
+}
+
+.subpage-display{
+    /*Examples of subpageDisplay are the database selection screen and the (TODO: SSURGO data folder selection screen.)*/
+    display: flex;
+    flex-direction: column;
+    .subpage-display--header, .subpage-display--footer{
+        display: flex;
+        flex-shrink: 0;
+        align-items: center;
+        justify-content: space-between;
+        padding: 1rem;
+    }
+    .subpage-display--header{        
+        border-top-left-radius: calc(.3rem - 1px);
+        border-top-right-radius: calc(.3rem - 1px);
+        border-bottom: #dee2e6 1px solid;
+        
+        .subpage-display--header--multilevel{
+            display: flex;
+            flex-shrink: 0;
+            align-items: center;
+            justify-content: space-between;
+            flex-direction: column;
+            padding: 0;
+            h1{
+                font-size: 1.85rem;
+            }
+            h2{
+                font-size: 1.25rem;
+                margin-bottom: 0;
+            }
+        }
+    }
+    .subpage-display--footer{
+        padding: 1rem;
+        border-bottom-left-radius: calc(.3rem - 1px);
+        border-bottom-right-radius: calc(.3rem - 1px);
+        border-top: #dee2e6 1px solid;
+        flex-direction: row-reverse;
+    }
+
+    .subpage-display--body{
+        /*Contains both the body and footer*/
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        justify-content: space-between;
+    }
+}
+
+
+
+.usdaLogoAndVersion{
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    margin-left: 3%;
+    @include at-media('desktop'){        
+        flex-direction: row;
+        align-items: center;
+        width: 400px;
+    }
+    img{
+        width: 20%;
+        @include at-media('desktop'){ 
+            max-width: 20%;
+            width: 15%;
+        }
+    }
+    >div{
+        flex-direction: column;        
+        @include at-media('desktop'){ 
+            margin-left: 5%;
+        }
+        p{
+            margin-bottom: 0;
+        }
+    }
+}
+
+.flexbox-column{
+    display: flex;
+    flex-direction: column;
+}
+
+select{
+    box-sizing: border-box;
+    background: #FFFFFF;
+    border: 1px solid #888888;
+    border-radius: 4px;
+}
+
+.applicationTitle {
+    font-size: 24px;
+    font-weight: 700;
+    margin: 55px auto;
+
+    .usa-tooltip__body, .usa-tooltip__body--top {
+        margin-top: 0.25rem;
+    }
+
+    .usa-tooltip__body--top:after, .usa-tooltip__body:after {
+        left: 10% !important;
+    }
+
+    #selectedDatabaseTooltipMsg {
+        background-color: black;
+        color: white;
+        font-size: 0.75rem;
+        font-weight: 400;
+        line-height: 1rem;
+        position: fixed;
+        width: 40%;
+        left: 50%;
+        padding: 0.5rem !important;
+    }
+}
+
+.header-title {
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    align-items: center;
+}
+
+.header-title>h1 {
+    margin-right: 10px;
+    font-weight: 700;
+    font-size: 24px;
+}
+
+.tab-content {
+    width: 100%;
+}
+
+.hideDisplay {
+    display: none;
+}
+
+.advancedOptions {
+    align-items: center;
+    display: flex;
+    flex-direction: column;
+    transition: color .15s ease-in-out, background-color .15s ease-in-out, border-color .15s ease-in-out;
+    margin-bottom: 25px;
+}
+
+.advancedOptions div {
+    align-items: center;
+}
+
+.advancedOptions div>div>input {
+    margin-right: 5px;
+}
+
+#viewDataBtn, 
+#deleteBtn,
+#importBtn {
+    font-size: 1.25rem;
+    margin-top: 1.5rem;
+}
+
+.advancedOptionsHelpMenuBtn {
+    text-decoration-line: underline;
+    color: #296CBD;
+}
+
+.advancedOptionsHelpMenuBtn:hover,
+.advancedOptionsHelpMenuBtn:active {
+    color: #103058;
+}
+
+#importAdvancedOptions {
+    background-color: #FFFFFF;
+    margin-bottom: 20px;
+    z-index: 1;
+    label {
+        display: inline;
+    }
+}
+
+.spAccordionBtn,
+.spAccordionBtn:hover {
+    margin-top: 5px;
+    font-size: 18px;
+    padding: 10px 5px;
+    color: #296CBD;
+    font-weight: 700;
+    transition: .3s ease;
+    text-decoration: none;
+}
+
+.spAccordionBtn.usa-accordion__button {
+    background-color: unset;
+}
+
+#generateRasterOptionsBtn {
+    margin-left: 0.5rem;
+}
+
+#generateRasterBtn {
+    width: 100%;
+}
+
+#existingRasterModal {
+    .usa-modal__main {
+        max-width: -webkit-fill-available;
+    }
+
+    #existingRasterModalMessage {
+        overflow-wrap: break-word;
+    }
+}
+
+.usa-accordion__button:disabled, 
+.usa-accordion__button:disabled:hover,
+.usa-accordion__button[aria-disabled=true], 
+.usa-accordion__button[aria-disabled=true]:focus, 
+.usa-accordion__button[aria-disabled=true]:hover {
+    color: color($theme-color-disabled) !important;
+    cursor: default;
+}
+
+.warningMessage {
+    color: #E90000;
+    font-weight: bold;
+    overflow-wrap: anywhere;
+    padding-top: 0.5rem;
+
+    .usa-tooltip__body, .usa-tooltip__body--top {
+        font-size: 0.75rem;
+        padding: 0.25rem;
+        margin-top: 0 !important;
+    }
+}
+
+.disabledRow{
+    color:#757575;
+    cursor: default !important;
+    --bs-table-hover-color: #919191 !important;
+    --bs-table-hover-bg: none !important;
+
+}
+
+.filter-gray {
+    filter: invert(93%) sepia(0%) saturate(0%) hue-rotate(186deg) brightness(88%) contrast(81%);
+}
+
+.filter-lightgray{
+    filter: brightness(0) saturate(100%) invert(100%) sepia(0%) saturate(1545%) hue-rotate(195deg) brightness(110%) contrast(66%);
+}
+
+.filter-blue{
+    filter: brightness(0) saturate(100%) invert(20%) sepia(86%) saturate(2348%) hue-rotate(188deg) brightness(93%) contrast(102%);
+}
+
+.filter-white{
+    filter: brightness(0) saturate(100%) invert(100%) sepia(100%) saturate(0%) hue-rotate(288deg) brightness(102%) contrast(102%);
+}
+
+.filter-green{
+    filter: brightness(0) saturate(100%) invert(57%) sepia(8%) saturate(3397%) hue-rotate(94deg) brightness(75%) contrast(77%);
+}
+
+.secondaryBtn{
+    color: #296CBD;
+}
+
+.sr-only {
+    position: absolute;
+    top: -30em;
+}
+
+/*1. END GENERAL*/
+
+/********* 2. HOME PAGE *********/
+ul.nav-pills .nav-link {
+    color: black;
+    background-color: transparent;
+    border: 4px #919191 solid;
+    width: 289px;
+    max-width: 289px;
+}
+
+.nav-pills .nav-link.active,
+.nav-pills .show>.nav-link {
+    color: black !important;
+    background-color: transparent !important;
+    border: 4px #296CBD solid;
+    background-image: url('/static/images/background-checkmark-tabs.svg');
+    background-position: 245px -3px;
+    background-repeat: no-repeat;
+}
+
+#navPillAndRefreshContainer{
+    display: flex;
+    justify-content: center;
+}
+
+.nav-item {
+    button.nav-link {
+        h3 {
+            margin: 0 !important;
+            font-size: 1rem;
+            font-weight: 400;
+        }
+    }
+}
+
+div#homePageContainer {
+    padding: 0;
+    width: 100%;
+}
+
+#homePageContainer>div {
+    position: relative;
+}
+
+#homePageContainer .container {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 0px !important;
+}
+
+#homePageContainer .container,
+#homePageContainer .row {
+    max-width: 100%;
+    width: 100%;
+    height: 100%;
+}
+
+/*Left Pane*/
+#homePageContainer .col-3 {
+    background-color: white;
+    padding: 34px 28px;
+    border-right: 1px #B8B8B8 solid;
+    width: 30% !important;
+    /*Width of .col-3 and .col-9 must equal 100% when added together*/
+}
+
+#homePageContainer .col-3 h2 {
+    font-size: 20px;
+    font-weight: 700;
+}
+
+#homePageContainer .col-3>.secondaryDiv {
+    border-bottom: 1px #B8b8b8 solid;
+    padding-bottom: 30px;
+    padding-top: 0px;
+}
+
+#selectFolderContainer {
+    display: flex;
+    flex-direction: column;
+    button{
+        width: 100%;
+    }
+    button:first-of-type{
+        margin-bottom: 5px;
+    }
+
+    #selectedFolderNameBrowseBtnDiv {
+        .usa-tooltip {
+            width: 100% !important;
+        }
+    }
+}
+
+.usa-input:disabled.leftPaneSelectedOptions {
+    background: none;
+    cursor: default;
+    margin: 0;
+}
+
+.usa-input-prefix, .usa-input-suffix {
+    color: #1b1b1b;
+}
+
+.advancedOptions div>div>input { 
+    margin: 0;
+}
+
+.usa-tabs {
+    width: auto;
+    > .usa-accordion > li {
+      display:inline;
+      width: auto;
+      background-color: transparent;
+      margin-right: 0.1rem;
+    }
+    .usa-accordion-button {
+      width: auto;
+      font-size: smaller;
+      display:inline-block;
+      clear:both;
+      background-image: none;
+      padding-right: 0.5rem;
+      border: 2px solid #C8C8C8;
+      border-bottom-color: transparent;
+      &[aria-expanded="true"] {
+        background-color: white;
+      }
+    }
+    .usa-accordion-button:focus{
+        padding-right: 0.5rem;
+    }
+    .usa-accordion-button:hover{
+        font-weight: 600;
+        padding-right: 0.2rem; /*reduce padding so only text in the button expands, not the button inself*/
+        border: 2px solid #666;
+    }
+    .usa-accordion-content {
+      box-sizing: border-box;
+      padding-left: 0.1em;
+      padding-right: 0.1em;
+      height: 55px;
+      clear:both;
+      width: 100%;
+      border: 2px solid #C8C8C8;
+      &[aria-hidden="false"] {
+        background-color: blue;
+        margin-top: -2px;
+      }
+    }
+  }
+
+
+
+#selectDatabaseContainer, #selectFolderContainer {
+    .leftPaneInputsMenu {
+        .leftPaneSelectedOptions + .usa-tooltip__body.is-visible {
+            left: calc(100% + 6rem) !important;
+        }
+    }
+
+    .usa-tooltip__body.is-visible {
+        font-size: 0.75rem;
+        padding: 0.25rem;
+    }
+}
+
+#getUserDatabase #getFolderList {
+    border: 2px solid #B8B8B8;
+    border-radius: 4px;
+}
+
+#SDVFoldersContainer {
+    height: 48vh;
+    overflow-y: auto;
+    border: 1px solid gray;
+}
+
+#SDVFolderList {
+    padding: 0px;
+    font-size: 1.25vw;
+
+    .usa-accordion__button {
+        width: 100%;
+        text-align: left;
+    }
+
+    ul {
+        margin-top: 0.25rem;
+        margin-left: 1rem;
+        padding-top: 0;
+    }
+
+    .usa-accordion__button[aria-expanded=true], .usa-accordion__button[aria-expanded=true]:hover {
+        background-image: url(../img/usa-icons/remove.svg),linear-gradient(transparent,transparent);
+    }
+}
+
+.validationText {
+    color: #b50909 !important;
+}
+
+.invalidIcon {
+    background-image: url('/static/images/exclamationCircle.svg');
+    background-repeat: no-repeat;
+    background-position: 95% 50%;
+}
+
+.invalidIcon.form-control {
+    border: solid 2px #b50909 !important;
+}
+
+.invalidIcon.form-control:focus {
+    border: solid 2px #b50909;
+    box-shadow: 0 0 0 0.25rem #f2938c !important;
+}
+
+#a1 {
+    min-height: fit-content;
+    height: fit-content !important;
+    padding: 0.5rem !important;
+}
+
+/* End Left Pane Styling */
+
+/*Header styling*/
+.topHeader {
+    background-color: white;
+    border-bottom: 1px #B8B8B8 solid;
+}
+
+.topHeader h1 {
+    margin: 0;
+    padding: 20px;
+    font-size: 16px;
+    font-weight: 700;
+    text-align: center;
+    margin-right: 5.5rem;
+    overflow-wrap: anywhere;
+
+    .usa-tooltip__body, .usa-tooltip__body--top {
+        font-size: 0.75rem;
+    }
+}
+
+/*End of header*/
+
+/*Style hover functionality for the import table. This logic is important for folders with multiple SSA's*/
+#importTable>tbody>tr:hover>td,
+#importTable>tbody:hover>tr:first-of-type>th {
+    background-color: rgba(0, 0, 0, 0.075) !important;
+}
+
+tbody th {
+    font-weight: 400;
+}
+
+table {
+    .usa-tooltip {
+        display: inline-grid;
+    }
+
+    .usa-tooltip__body, .usa-tooltip__body--top, .usa-tooltip__body--bottom {
+        font-size: 0.75rem;
+        padding: 0.25rem;
+        margin-top: 1.5rem;
+    }
+
+    .usa-tooltip__body--top:after, .usa-tooltip__body--bottom:after, .usa-tooltip__body:after {
+        left: 15% !important;
+    }
+
+    th > button{
+        background-color: #fff;
+        width: 100%;
+        display: flex;
+        border: none;
+    }
+
+    td {
+        .usa-tooltip__body--top:after, .usa-tooltip__body--bottom:after, .usa-tooltip__body:after {
+            left: 8% !important;
+        }
+    }
+
+    th.usa-checkbox {
+        vertical-align: middle !important;
+
+        .usa-checkbox__label::before {
+            margin-top: -0.5rem;
+        }
+    }
+}
+
+#importTable {
+    margin-bottom: 10% !important;
+}
+
+/*Main Pane*/
+
+/*Tab navigation*/
+#homePageContainer ul.nav-pills {
+    justify-content: center;
+    margin-top: 21px;
+}
+
+#homePageContainer .nav-pills .nav-link.active,
+.nav-pills .show>.nav-link {
+    color: black !important;
+    background-color: transparent !important;
+    border: 4px #296CBD solid;
+    background-repeat: no-repeat;
+    background-image: url(/static/images/background-checkmark-tabs.svg);
+}
+
+#homePageContainer .nav-pills .nav-link {
+    border: 4px #B8B8B8 solid;
+
+}
+
+/*End of Tab navigation*/
+
+/*Home Page main body*/
+#homePageContainer .col-9 .tab-content {
+    padding: 21px 34px;
+    margin-bottom: 25px;
+}
+
+#homePageContainer .col-9 {
+    background-color: #FAFAFA;
+    padding: 0;
+    width: 70%;
+    /*Width of .col-3 and .col-9 must equal 100% when added together*/
+}
+
+.no-text-highlight {
+    /* prevents text from being highlighted when multiple rows are selected using shift*/
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    user-select: none;
+}
+
+/* hide checkbox select behind row select */
+.customCheckbox {
+    pointer-events: none;
+}
+
+.downloadSpinner {
+    position: absolute;
+    z-index: 2;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(255,255,255,0.8);
+}
+
+.loadTableScreen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: inherit;
+}
+
+.loadTableScreen>div {
+    width: 8rem;
+    height: 8rem;
+}
+
+.loadTableScreen>span {
+    margin-top: 30px;
+}
+
+input[type=checkbox] {
+    height: 18px;
+    width: 18px;
+}
+
+#emptyDatabaseGrayIcon {
+    margin: 1rem 0;
+}
+
+/* Accordions */
+button#toggleDuplicateDiv.usa-accordion__button {
+    padding: 0 3rem 0 0;
+    background-color: color("cyan-5");
+    margin-bottom: 0.25rem;
+}
+
+button#toggleErrorDiv.usa-accordion__button {
+    padding: 0 3rem 0 0;
+    background-color: color("yellow-5");
+    margin-bottom: 0.25rem;
+}
+
+button#toggleDbOutdatedSsaInfoDiv.usa-accordion__button {
+    padding: 0 3rem 0 0;
+    background-color: color("cyan-5");
+    margin-bottom: 0.25rem;
+}
+
+button#toggleDbNonExistingSsaInfoDiv.usa-accordion__button {
+    padding: 0 3rem 0 0 !important;
+    background-color: color("cyan-5");
+    margin-bottom: 0.25rem;
+}
+
+#errorDiv, 
+#duplicateDiv,
+#outdatedInfoDiv,
+#nonExistingSsaInfoDiv {
+    margin-left: 1rem;
+    margin-bottom: 0.5rem;
+}
+
+/*Pretest error display*/
+
+#errorDiv {
+    .usa-alert {
+        margin-top: 0.25rem; 
+        margin-bottom: 0.25rem;
+    }
+}
+
+/*Duplicate area symbol display*/
+.infoIcon {
+    height: 27px;
+    width: 27px;
+    margin-right: 7px;
+}
+
+.treeViewFolderIcon {
+    width: 17px;
+    margin-right: 5px;
+}
+
+.treeViewDatabaseIcon {
+    width: 13px;
+    margin-right: 5px;
+}
+
+#toggleErrorText {
+    .usa-alert {
+        width: inherit;
+
+        p {
+            margin: 0;
+        }
+    }
+}
+
+/*errorButton Will be implemented at a later time*/
+.errorButton {
+    margin-left: auto;
+    background: transparent;
+    border: none;
+    color: #205493;
+    text-decoration: underline;
+}
+
+h2.usa-alert__heading {
+    font-weight: 700;
+}
+
+/*End Pretest error display*/
+
+/*Import error display*/
+/*Successful imports*/
+#toggleProgressErrorDiv, 
+#progressListButton {
+    width: 100% !important;
+    padding: 0 3rem 0 0;
+    margin-bottom: 0.5rem;
+
+    .usa-alert {
+        p {
+            font-weight: 800;
+        }
+    }
+}
+
+button#progressListButton.usa-accordion__button {
+    padding: 0 3rem 0 0;
+    background-color: color("green-cool-5");
+    margin-bottom: 0.25rem;
+}
+
+button#toggleProgressErrorDiv.usa-accordion__button {
+    padding: 0 3rem 0 0;
+    background-color: color("red-warm-10");
+    margin-bottom: 0.25rem;
+}
+
+/*End Import error display*/
+/*End Successful imports*/
+/*End Collapsable container*/
+/*End Home Page main body*/
+
+/*Home Page Tree View Modals*/
+.modal.show div.modal-dialog {
+    max-width: 100%;
+    height: 100vh;
+    margin: auto auto;
+}
+
+.modal-title {
+    margin-left: auto;
+    margin-right: auto;
+    font-size: 1.25rem;
+}
+
+.modal-header {
+    border-bottom: 1px gray solid !important;
+}
+
+div.modal-content {
+    height: 100%;
+}
+
+#textTemplatesContainer {
+    width: 20rem;
+}
+
+/*Home Page Import Progress screen*/
+.progressScreen {
+    margin: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 75%;
+    align-self: center;
+}
+
+.progressScreen>* {
+    margin-top: 10px;
+}
+
+.progressScreen>div:last-of-type {
+    div{
+        flex-direction: column;
+        justify-content: center;
+        width: 100%;    
+        @include at-media('desktop'){
+            flex-direction: row;
+        }
+    }
+    button{
+        @include at-media('desktop'){
+            width: 20%;
+        }
+        font-size: 1.25rem;
+    }
+}
+
+.progressBarSuccessContainer {
+    max-width: 1000px;
+    width: 100%;
+    display: flex;
+    align-items: center;
+}
+
+.progressBarSuccessContainer>div {
+    height: 100%;
+}
+
+#loadingIcon {
+    height: 25px;
+    width: 25px;
+    color: #0d6efd !important;
+    margin-left: 8px;
+}
+
+.timer {
+    display: flex;
+    flex-direction: row;
+    align-self: center;
+}
+
+.timer p {
+    margin-right: 5px;
+}
+
+/*End Home Page Import Progress screen*/
+/*End Home Page Tree View Modals*/
+/*End Home Page*/
+
+/*Logic to center last two columns in the table header of the importTable*/
+#importTable>thead>tr>th:nth-last-child(-n+3) {
+    text-align: center;
+}
+
+/*Logic to center last two columns in the table body of the importTable*/
+#importTable>tbody>tr>td:nth-last-child(-n+3) {
+    text-align: center;
+}
+
+/*Style columns in the tables*/
+
+.usa-table {
+    width: 100%;
+}
+
+.usa-table-container--scrollable {
+    text-align: center;
+    max-height: 51vh;
+    overflow-y: auto;
+    height: fit-content;
+
+    tr:hover {
+        cursor: pointer;
+    }
+
+    td {
+        white-space: unset;
+    }
+}
+
+/*Targets tables on the import and existing pages*/
+.table>tbody>tr {
+    vertical-align: middle;
+    cursor: pointer;
+}
+
+.tableFooter {
+    display: flex;
+    flex-direction: row;
+    justify-content: flex-end;
+    align-items: flex-start;
+    margin-top: .5rem;
+}
+
+.tableFooter p {
+    margin-right: auto;
+}
+
+.tableFooter button {
+    color: #FFFFFF;
+    background-color: #296CBD;
+    border: transparent;
+    width: 203px;
+    height: 61px;
+    margin-left: 8px;
+}
+
+/*2. END HOME PAGE*/
+
+/*3. HELP PANE*/
+.helpPaneContainer {
+    display: none;
+    width: 375px;
+    max-width: 75%;
+    height: 100%;
+    max-height: 100%;
+    overflow: auto;
+    position: absolute;
+    padding: 13px;
+    right: 0px;
+    top: 0px;
+    border: 1px black solid;
+    background-color: white;
+    z-index: 99;
+}
+
+/*Jump Link container in the Help Menu*/
+.helpPaneContainer>div>div {
+    margin-bottom: 20px;
+    padding: 15px 20px;
+    width: fit-content;
+}
+
+.helpPageContainer button {
+    margin-left: -20px;
+}
+
+/*Target the Close and Expand buttons in the Help Pane header*/
+#helpPaneHeader img {
+    width: 20px;
+    height: 20px;
+}
+
+/*Force the first level of a unorganized list to be a solid black circle*/
+.helpPageContainer ul {
+    list-style-type: disc;
+}
+
+/*Force the second level of a unorganized list to be a black outline circle*/
+.helpPaneContainer ul>ul {
+    list-style-type: circle;
+}
+
+.containsSubHeaders {
+    margin-left: 10px;
+}
+
+/*Use this to target a container that has sub headers.*/
+.containsSubHeaders>div {
+    width: fit-content;
+    margin-left: 13px;
+}
+
+.containsSubHeaders img {
+    transform: rotate(90deg);
+}
+
+/*Target a header that does not have any sub headers*/
+.onlyHeader {
+    margin-left: 17px;
+}
+
+/*Specific to the close button for the help pane on the Home Page*/
+.helpPaneContainer>.btn {
+    position: absolute;
+    right: 0px;
+    top: 0px;
+}
+
+/*Header for the help menu*/
+#helpPaneHeader {
+    display: flex;
+    justify-content: space-between;
+    text-align: center;
+    flex-direction: row-reverse;
+}
+
+
+/* This sections applies a black box shadow to all tabbable items in SSURGO to make it 508 compliant. */
+button:focus, button[type="button"]:focus, input[type="button"]:focus, input[type="submit"]:focus, *[role="button"]:focus{
+    -webkit-box-shadow: 0 0 2px 3px black !important;
+    -moz-box-shadow: 0 0 2px 3px black !important;
+    box-shadow: 0 0 2px 3px black !important;
+}
+
+/*Stylize the anchor tags in the help menus*/
+.helpPaneContainer a {
+    color: #296CBD;
+    display: inline-block;
+    margin-bottom: 7px;
+}
+
+.helpPageContainer button {
+    padding: 0;
+}
+
+.usa-radio__label {
+    margin-left: 5%;
+}
+
+/*Stylize the headers in the help menu*/
+.helpPageContainer {
+    section h1,h2,h3,h4,h5 {
+        color: #296CBD;
+    }
+}
+
+.labels {
+        /*Example: File Path, Folders, Files*/
+        text-align: left;
+        margin-top: 34px;
+        font-size: 18px;
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        height: fit-content;
+    
+    > h2{
+        color: #212529 !important;
+        font-size: 20px;
+        font-weight: 600;
+        line-height: 1rem;
+        margin-top: 0;
+        margin-bottom: 0;
+        margin-right: 1%;
+    }
+
+    > button > img {
+        width: 25px;
+    }
+    label{
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+}
+
+.helpPaneContainer h1 {
+    font-size: 2em;
+}
+
+.helpPaneContainer h2 {
+    font-size: 2em;
+}
+
+.helpPaneContainer h3 {
+    font-size: 1.55em;
+}
+
+.helpPaneContainer h4 {
+    font-size: 1.4em;
+}
+
+.helpPaneContainer h5 {
+    font-size: 1.1em;
+}
+
+/*Stylize the image in the Select SSURGO Location help text*/
+#SSURGOLocationExample {
+    display: block;
+    margin-left: -70px;
+    border: 2px solid black;
+    pointer-events: none;
+}
+
+/*3. END HELP PANE*/
+
+/*4. TREE VIEW*/
+/*Clickable Path*/
+.folderName:not(:last-child) {
+    color: #296CBD;
+    text-decoration: underline;
+} 
+
+.folderName span:hover,
+.folderName span:focus {
+    cursor: pointer;
+    font-weight: bold;
+}
+
+.usa-breadcrumb {
+    font-size: 1.25rem !important;
+}
+
+.clickablePathContainer {
+    width: 70%;
+    display: inline-flex;
+    justify-content: flex-start;
+    align-items: center;
+    overflow-x: visible;
+
+    .usa-breadcrumb {
+        padding: 0 !important;
+
+        .usa-breadcrumb__link {
+            cursor: pointer;
+        }
+    }
+}
+
+.clickablePathContainer img {
+    margin: 0 13px;
+}
+
+.clickablePathContainer p {
+    font-style: normal;
+    font-weight: 500;
+    font-size: 20px;
+    line-height: 23px;
+    display: inline-flex;
+    flex-direction: row;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.usa-input.databaseTextBox {
+    margin-right: 0.25rem;
+}
+
+.popover {
+    height: 75px !important;
+}
+
+/*End clickable path*/
+.folderHeader {
+    /*Required becase we have a search bar button*/
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.folderHeader>button {
+    height: 30px;
+    padding: 0px !important;
+}
+
+/*Search bar*/
+.searchBar {
+    width: 30%;
+    position: relative;
+    align-items: end !important;
+}
+
+.searchBar input {
+    vertical-align: -50%;
+    width: 100%;
+    padding: 0.5rem;
+    display: flex;
+    flex-direction: row;
+}
+
+.searchIcon input {
+    background-image: url('/static/images/searchIconBlackFill.svg');
+    background-repeat: no-repeat;
+    background-position: 10px 50%;
+    padding-left: 2rem;
+}
+
+/*End search bar*/
+/*Button to create new database*/
+.buttonWithCircleIcon {
+    padding: 0.5rem !important;
+    display: flex !important;
+    align-items: flex-start !important;
+    justify-content: center;
+    flex-direction: column;
+}
+
+.buttonWithCircleIcon>* {
+    margin-bottom: 8px !important;
+}
+
+.buttonWithCircleIcon p {
+    color: #205493 !important;
+    text-align: center;
+}
+
+.buttonWithCircleIcon img {
+    align-self: center;
+    width: 33px;
+    height: 33px;
+}
+
+/*End button to create new database*/
+
+#createNewDatabaseModal {
+    margin-top: 5%;
+}
+
+div.createNewDatabaseModalContainer {
+    height: auto !important;
+    display: flex !important;
+    align-items: flex-start !important;
+    justify-content: center !important;
+    max-width: 500px !important;
+}
+
+.createNewDatabaseLabels {
+    font-style: normal;
+    font-weight: 400;
+    font-size: 18px;
+    line-height: 21px;
+    display: flex;
+    align-items: center;
+    color: #282828;
+}
+
+.footerFolderNavigation{
+    justify-content: space-between;
+    .usa-label {
+        margin-top: 0 !important;
+    }
+}
+
+.footerFolderNavigation>span{
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-width: 400px;
+    margin-right: 5%;
+}
+
+.footerFolderNavigation>span>select{    
+    height: 50px;
+}
+
+.footerFolderNavigation>p{
+    margin-right:0%;
+    max-width: 50%;
+}
+
+#createNewDatabaseName,
+#templateTypeDropdown {
+    width: 400px;
+    height: 50px;
+}
+
+#createNewDatabaseLocation {
+    overflow-wrap: anywhere;
+}
+
+#versionCheckModal h1{
+    color: #296CBD;
+}
+
+/*End Create New Database Modal */
+
+.filePathContainer {
+    display: inline-flex;
+    flex-direction: row;
+    justify-content: center;
+    align-items: center;
+    width: 100%;
+    border: none;
+    background: transparent;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px black solid;
+}
+
+.filePathContainer input:first-of-type {
+    width: 100%;
+}
+
+.folderNode {
+    max-height: 205px;
+}
+
+.fileNode {
+    max-height: 145px;
+}
+
+.folderNode button {
+    width: fit-content;
+    height: fit-content;
+    padding: 8px;
+    margin-right: 13px;
+    margin-bottom: 5px !important;
+    display: inline-flex;
+    border: 2px #B8B8B8 solid;
+    align-items: center;
+    transition: .3s ease-in;
+    overflow-x: hidden;
+    text-overflow: ellipsis;
+}
+
+.folderNode button:hover,
+.folderNode button:focus {
+    cursor: pointer;
+    background: #B8B8B8;
+
+}
+
+.folderNode button img {
+    margin-right: 5px;
+}
+
+.fileNode button {
+    width: fit-content;
+    height: fit-content;
+    margin-right: 13px;
+    margin-bottom: 13px;
+    display: inline-flex;
+    padding: 8px;
+    border: 1px #d4e2f2 solid;
+    align-items: center;
+    color: #205493;
+    background-color: #d4e2f2;
+    transition: .3s ease-in;
+    overflow-x: hidden;
+    text-overflow: ellipsis;
+}
+
+.fileNode button:hover {
+    cursor: pointer;
+    background-color: #95bdeb;
+    border: 1px #95bdeb solid;
+    color: #205493;
+}
+
+.fileNode button img {
+    width: 36px;
+}
+
+.folderNode,
+.fileNode {
+    display: flex;
+    flex-direction: row;
+    justify-content: flex-start;
+    align-items: center;
+    flex-wrap: wrap;
+    overflow-y: auto;
+}
+
+.switchInputs {
+    /*change clickable path to editable path. Vise versa is true*/
+    border: none;
+    background: transparent;
+}
+
+
+.buttonFolderName {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-bottom: 0;
+    width: 116px;
+}
+
+#selectDatabasePage,
+#selectSSAPage {
+    max-width: 100% !important;
+}
+
+.folderTreeTableContainer{
+    /*Specific to fileless tree views*/
+    /*max-width: 875px;*/
+    width: 80% !important;
+    max-width: 80%;
+    display: flex;
+    flex-direction: column;
+    margin-left: auto;
+    margin-right: auto;
+    min-height: fit-content;
+    justify-content: flex-start !important;
+}
+
+.forlderTreeBtn{
+    margin-left: 0.5rem;
+}
+
+.databaseFolderTreeBottomContainer {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 8px;
+    width: 100%;
+}
+
+#textTemplatesOptions {
+    label {
+        display: inline;
+    }
+}
+
+button#textTemplatesOptionsBtn {
+    padding: 0;
+} 
+
+button#textTemplatesOptionsBtn.usa-accordion__button,
+button#textTemplatesOptionsBtn.usa-accordion__button:hover {
+    background-color: unset;
+}
+
+/*4. END TREE VIEW*/
+/*5. SDV */
+#interpTypeName{
+    font-size: x-large;
+    font-weight: 500;
+    margin-top: 8px;
+}
+
+#aggregationName{
+    font-size: xx-large;
+    font-weight: 800;
+    margin-top: 8px;
+}
+
+#sdvRatingOptionsContainer{
+    display: flex;
+    justify-content: space-between;
+}
+
+#sdvRatingOptionsContainer > div{
+    border: 1px solid;
+    width: 49%;
+    padding: 2%;
+}
+
+#sdvRatingOptionsContainer > div:nth-of-type(2) > label:first-of-type{
+    font-weight: 800;
+    font-size: larger;
+    display: flex;
+    flex-direction: column;
+    text-align: center;
+}
+
+#SDVFolderList {
+    .usa-accordion__button {
+        width: 100%;
+        text-align: left;
+    }
+
+    ul {
+        margin-top: 0.25rem;
+        margin-left: 1rem;
+        padding-top: 0;
+    }
+
+    .usa-accordion__button[aria-expanded=true], .usa-accordion__button[aria-expanded=true]:hover {
+        background-image: url(../img/usa-icons/remove.svg),linear-gradient(transparent,transparent);
+    }
+}
+
+#SDVFoldersContainer {
+    height: 55vh;
+    width: 90%;
+    overflow-y: auto;
+    border: 1px solid gray;
+}
+
+#SDVFolderList {
+    padding: 0px;
+    font-size: 1.25vw;
+}
+
+.sdvFolderListItem {
+    display: list-item;
+    margin: auto;
+    background: no-repeat left center;
+    padding: 2px 0px 2px 35px;
+    list-style: none;
+    margin-left: 2px;
+    text-align: center;
+    width: auto;
+    border: none;
+    font-size: 1.05vw;
+    white-space: nowrap;
+}
+
+.listedAttributeItem {
+    display: list-item;
+    padding: 2px 0px 2px 0px;
+    list-style: none;
+    text-align: left;
+    width: auto;
+    border: none;
+    background: none;
+    font-size: 1.05vw;
+}
+
+#sdvRatingOptions .usa-radio {
+    background-color: #FAFAFA;
+}
+
+#sdvRatingOptions .usa-radio__input {
+    font-weight: bold;
+    display: block;
+    margin-left: 5px;
+}
+#sdvRatingOptionsContainer {
+    text-align: left;
+}
+
+#sdvRatingOptions {
+    border: 1px solid;
+    width: 50%;
+    padding: 2%;
+}
+
+#sdvRatingOptions >div:not(:first-of-type){
+    padding-left: 2.5%;
+}
+#sdvRatingOptions >div:not(:first-of-type) > div{
+    padding-left: 2.5%;
+}
+
+#sdvRatingOptions legend,
+#sdvRatingOptions label:not(.usa-radio__label)
+{
+    font-weight: bold;
+    display: block;
+    margin: .25rem;
+}
+
+#sdvRatingOptions label{
+    margin-top: 1% !important;
+}
+
+#sdvRatingOptions{
+    > div > h5{
+        border-bottom: solid 2px black;
+        padding-bottom: 2%;
+    }
+    > div:nth-of-type(2) > h5{
+        margin-top: 2%;
+    }
+    > div:nth-of-type(3) > h5{
+        margin-top: 5%;
+    }
+}
+
+#sdvRatingOptionsHeaderContainer{
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+}
+
+
+/*#sdvRatingDescriptions > * > .usa-accordion__button{*/
+#sdvRatingDescriptions .usa-accordion__button{
+    margin-top: 8px;
+}
+
+/*Target nested accordion containing the aggregation method descriptions*/
+#sdvRatingDescriptions > div > div > div:first-of-type > .usa-accordion__button{
+    margin-top: 4%;
+} 
+
+#sdvTableContainer {
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    margin-bottom: 1.5rem;
+}
+
+#SDVFolderList .active{
+    font-weight: bold;
+}
+
+#SDVFolderList .active-attribute{
+    font-weight: bold;
+}
+
+.sdvAttributesList{
+    margin-left: 0.5em;
+}
+
+.sdvAttributesList>li {
+    list-style-type: disc;
+    color: black;
+}
+
+#folderOrAttributeName {
+    text-align: left;
+    margin-bottom: 1rem;
+    font-weight: bold;
+    font-size: 1.25rem;
+}
+
+.sdvButton {
+    border: none;
+}
+
+#sdvRatingOptions .usa-label {
+    margin-bottom: 0.5rem !important;
+}
+
+#sdvRatingOptions > div > select, 
+#sdvRationOptions > div > input { 
+    margin: 0;
+    width: 100%;
+}
+
+#sdvLoadingScreen{
+    padding: 10%;
+}
+
+#innerDepthFieldset {   
+    padding-left: 2%;
+    padding-bottom: 2%;
+    margin-left: 5%;
+    margin-right: 5%;
+    margin-top: 2%;
+    margin-bottom: 2%;
+    border: 1px solid;
+}
+
+#innerDepthFieldset > .usa-radio__label {
+    margin-top: 2%;    
+}
+
+#innerDepthFieldset > .usa-radio:first-of-type{
+    margin-top: 2%;
+}
+
+.depthRangeLabels {
+    text-align: left;
+    padding: 0.25rem 0.5rem;
+    margin: 0 !important;
+}
+
+.usa-input.depthRangeInputs {
+    margin-left: 0.5rem;
+    margin-right: 0.5rem;
+    margin-top: 0;
+    width: max-content;
+}
+
+.sdvSubFolderList {
+    list-style-type: none;
+}
+
+/*5. END SDV*/
+/*6. LANDING PAGE*/
+#landingPageBody,
+#promptUsersToImport{
+    align-items: center;
+    @include u-margin-top(5);
+    @include at-media('desktop'){
+        display: flex;
+        justify-content: center;
+    }
+    .usa-card{
+        @include grid-col(8);
+        @include u-margin-x("auto");
+        @include at-media('desktop'){
+            @include grid-col(6);
+            @include u-margin-x("auto");
+        }
+
+        .usa-card__container{
+            align-items: center;
+        }
+
+        h1{
+            font-size: 1.5rem;
+        }
+    }
+}
+/*6. END LANDING PAGE*/
+/*7. MAP PAGE*/
+
+.custom-label {
+    position: relative;
+    display: inline-block;
+    background: transparent;
+    background-color: transparent; /* Set your desired background color */
+    color: red; /* Text color */
+    padding: 5px 10px; /* Adjust padding as needed */
+    border-radius: 6px; /* Rounded corners */
+    font-size: 14px; /* Set your desired font size */
+    font-weight: bold; /* Optional: Make the text bold */
+}
+
+.custom-label:hover {
+    color: lightblue; /* Change color on hover if desired */
+}
+
+.downloadMapIssue{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    > img{
+        width: 25%;
+        height: 25%
+    }
+    > p:first-of-type{
+        font-weight: 600;
+        font-size: x-large;
+    }
+    > p:nth-of-type(2){
+        font-weight: 600;
+        font-size: large;
+    }
+}
+
+#downloadPageSubPageBody {
+    flex-direction: column !important;
+    max-width: 100%;
+    justify-content: space-evenly;
+    
+    @include at-media('desktop'){
+        flex-direction: row !important;
+        max-width: 100%;
+        justify-content: space-evenly;
+    }
+
+    #downloadOptions{
+        margin-left: 2%;
+        margin-right: 2%;
+        @include at-media('desktop'){
+            max-width: 20%;
+        }
+        #downloadSSAContainer{            
+            overflow-y: auto;
+            border: 1px solid gray;
+            height: 80vh;
+            @include at-media('desktop'){
+                height: 48vh;
+            }
+        }
+    }
+    #mapIt{
+        max-width: 100%; 
+        max-height: 100%;
+        width: 90dvw;
+        height: 100vh;
+        margin-left: auto;
+        margin-right: auto;
+        @include at-media('desktop'){
+            width: 75dvw; 
+            height: 80dvh; 
+        }
+    }
+
+}
+
+#downloadOverwriteFlgContainer{
+    display: flex;
+    align-items: center;
+    margin: 2% 0 2% 0;
+}
+/*7. END MAP PAGE*/
+
+/*8. RESPONSIVE SCREENS*/
+/*Screens 1440px or larger*/
+@media screen and (min-width: 1440px) {
+    #homePageContainer .col-3 {
+        width: 23% !important;
+    }
+
+    #homePageContainer .col-9 {
+        width: 77% !important;
+    }
+}
+
+/*8. END RESPONSIVE SCREENS*/
+

@@ -1,0 +1,2219 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset="UTF-8">
+    <title>SSURGO Portal</title>
+    <link rel="stylesheet" href="/uswds/css/styles.css" type="text/css">
+    <link rel="icon" href="/static/images/ncss.svg"> <!--fav.icon-->
+    <link rel="stylesheet" href="leaflet/css/leaflet.css" type="text/css"/>
+    <link rel="stylesheet" href="leaflet/css/leaflet.draw.css" type="text/css"/>
+    <script type='text/javascript' src="/uswds/javascript/uswds-init.min.js"></script>
+    <script type="importmap">
+        {
+            "imports":{
+                "lit": "/static/js/lit-all.min.js",
+                "apiService": "/static/services/apiService.mjs",
+                "sdaService": "/static/services/sdaService.mjs"
+            }
+        }
+    </script>      
+</head>
+<body>
+    
+    <!------------------ Loading Page ------------------->
+    <div id="startupLoadingScreen" class="subpage-display" role="main">
+        <div class="subpage-display--header">
+            <div class="usdaLogoAndVersion" >
+                <img src="/static/images/usda-logo-color.svg" alt="USDA Logo">
+                <div >
+                    <!--Due to expedience of loading, this is hard coded in. This is a direct copy of usdaLogoAndVersion.html-->
+                    <p>SSURGO Portal <span class="versionNumText"></span></p>
+                    <p>US DEPARTMENT OF AGRICULTURE</p>
+                    <!-- TODO: Acording to https://www.usda.gov/style-guide/logo#lockups, 
+                     The subentity cannot be provided without including the agency title. Need new mockup from max if we want to include NRCS.
+                     UPDATE: Max provided an updated value within GAIA-4460
+                    <p>Natural Resources Conservation Service</p>-->
+                </div>
+            </div>
+            <button id="loadingPageContactUsBtn" class="usa-button usa-button--outline helpPaneBtn contactUs" onclick="toggleContactUs()">Contact us</button>
+        </div>
+        <div class="subpage-display--body" style="margin: auto; justify-content: center;" aria-busy="true" aria-live="polite">
+            <div style="display: flex; flex-direction: column; align-items: center;">
+                <div id="startupLoadingSpinner" class="spinner-border text-primary" style="width: 6rem; height: 6rem; padding: 5px;"></div>
+                <img id="startupDoneLoadingImg" src="/static/images/checkmarkFilled.svg" style="display: none; width: 6rem; height: 6rem; padding: 5px;" alt="done loading" class="filter-green"/>
+                <h1 id="startupLoadingMsg" style="margin-top: 1rem; font-size: 1.5rem;">Initializing SSURGO Portal...</h1>
+            </div>
+            <button id="closeStartupLoadingScreen" class="usa-button" onclick="$('#startupLoadingScreen, #landingPageContainer').toggle()" style="display: none;">Continue</button>
+        </div>
+    </div>
+    <!------------------ Landing Page ------------------->
+    <div id="landingPageContainer" class="subpage-display" style="display: none;" aria-hidden="true" role="main">
+        <div class="subpage-display--header">
+            <div style="display: flex; flex-direction: row;">
+                <button class="usa-button usa-button--unstyled" id="landingPageBackBtn" aria-labelledby="navigateBackToHomeAriaLabel"  onclick="navigateBackToLandingPage('selectDatabaseBrowseBtn')" style="display: none;">
+                    <img src="/static/images/arrow-left-circle.svg" class="margin-2" alt="Navigate back to the home screen"/>
+                </button>
+                <div include-html="/static/SubComponents/HtmlComponents/usdaLogoAndVersion.html"></div>
+            </div>
+            <div>
+                <button id="landingPageHelpBtn" class="usa-button usa-button--outline helpPaneBtn" onclick="toggleHelpPaneContent('homePageHelpPaneContent')">Help</button>
+                <button id="landingPageContactUsBtn" class="usa-button usa-button--outline helpPaneBtn contactUs" onclick="toggleContactUs()">Contact us</button>
+            </div>
+        </div>
+        <div id="landingPageBody" class="grid-container subpage-display--body center-cards">
+            <div class="grid-row">
+                <ul class="usa-card-group">
+                    <li class="usa-card">
+                        <div class="usa-card__container">
+                            <div class="usa-card--header">
+                                <h1 class="usa-card__header">Create a database</h1>
+                            </div>
+                            <div class="usa-card__body" id="createDatabaseButtonDetails">
+                                <p>Create an empty SSURGO database to import SSURGO files. Later, you can use Soil Data Viewer to analyze those files.</p>
+                            </div>
+                            <div class="usa-card__footer">
+                                <button class="usa-button" onclick="landingPageInitializeTreeView(true)">Create a database</button>
+                            </div>
+                        </div>
+                    </li>
+                    <li class="usa-card">
+                        <div class="usa-card__container">
+                            <div class="usa-card--header">
+                                <h1 class="usa-card__header">Open a database</h1>
+                            </div>
+                            <div class="usa-card__body" id="openDatabaseButtonDetails">
+                                <p>Open a populated SSURGO database you already created. Later, you can use Soil Data Viewer to analyze those files.</p>
+                            </div>
+                            <div class="usa-card__footer">
+                                <button class="usa-button" onclick="landingPageInitializeTreeView(false)">Browse your computer</button>
+                            </div>
+                        </div>
+                    </li>
+                </ul>
+            </div>            
+        </div>
+        <div class="grid-row" style="display: none;">
+            <button class="usa-button usa-button--outline">Back</button>
+        </div>
+    </div>
+
+    <!------------------ Home Page ------------------->
+    <div id="homePageContainer" style="display: none;">
+        <div class="container">
+            <!--TODO: remove div class="row"-->
+            <div class="row">            
+                <!--Side menu selection options-->
+                <div class="col-3" role="navigation" aria-label="Select SSURGO Datasets to Import">
+                    <div id="selectDatabaseContainer">
+                        <h2 class="usa-label">Database</h2>
+                        <div id='getUserDatabaseModal' class="leftPaneInputsMenu flexbox-column" method="post">
+                            <p id="selectedDatabaseNameLeftPane" class="selectedDatabaseNameTopHeader usa-tooltip" data-position="right" title="No Database Selected"
+                            role="form">No Database Selected</p>
+                            <button type="button" id="selectDatabaseBrowseBtn" 
+                                class="usa-button usa-button--outline usa-tooltip margin-right-0" data-position="bottom" style="width: 100%;"
+                                title="Navigate back to the options to select or create a database." onclick="displayLandingPage()">
+                                Open or create a database
+                            </button>
+                        </div>
+                    </div>
+                    <div id="selectFolderContainer" class="secondaryDiv">
+                        <h2 id="selectedFolderNameTitle" class="usa-label">SSURGO Data Source</h2>
+                        <div id="selectedFolderNameBrowseBtnDiv" style="display: flex; flex-direction: column;">
+                            <button id="downloadFromWebBtn" class="usa-button usa-tooltip downloadFromWebBtn" type="button" data-placement="right" 
+                            title="Select soil survey areas from Web Soil Survey to download to your local machine without having to leave SSURGO Portal.">
+                                Download data from the web
+                            </button>
+                            <button type="button" aria-label="Select Folder of SSURGO Data on your local machine" id="selectedFolderNameBrowseBtn" class="usa-button usa-button--outline toggleDisableOnLoad margin-right-0 usa-tooltip" 
+                            disabled="true" data-bs-placement="tooltip" data-position="bottom" title="Select data that has already been downloaded to your machine" onclick="initializeTreeView('importTreeViewTable', 'pretestimportcandidates')">
+                                Browse your computer
+                            </button>
+                        </div>
+                    </div>
+                    <div id="importOptionsContainer" class="advancedOptions">
+                        <button id="importBtn" class="usa-button usa-button--big toggleDisableOnLoad" type="button" disabled="true">Import SSURGO Data</button>
+                        <div class="usa-accordion">
+                            <h2 class="usa-accordion__heading">
+                                <button
+                                    type="button"
+                                    id="importAdvancedOptionsBtn"
+                                    class="usa-accordion__button toggleDisableOnLoad spAccordionBtn"
+                                    aria-expanded="false"
+                                    aria-controls="importAdvancedOptions"
+                                    disabled
+                                >
+                                    Advanced Import Options
+                                </button>
+                            </h2>
+                            <div id="importAdvancedOptions" class="usa-accordion__content">
+                                <div class="usa-checkbox">
+                                    <input
+                                        class="usa-checkbox__input"
+                                        id="loadTabularData"
+                                        type="checkbox"
+                                        name="advanced-import-options"
+                                        value="load-tabular-data-only"
+                                    />
+                                    <label class="usa-checkbox__label" for="loadTabularData">Load Tabular Data Only</label>
+                                </div>
+                                <!--
+                                    This will be implemented Post-Prototype
+                                    TODO: Enable spatial sort in SSURGO Portal UI
+                                    <div>
+                                    <input type="checkbox" id="spatialSort">
+                                    <label for="spatialSort">Enable Spatial Sort</label>
+                                </div>-->
+                                <div class="usa-checkbox">
+                                    <input
+                                        class="usa-checkbox__input"
+                                        id="dissolve"
+                                        type="checkbox"
+                                        name="advanced-import-options"
+                                        value="disable-dissolve"
+                                    />
+                                    <label class="usa-checkbox__label" for="dissolve">Disable Dissolve</label>
+                                </div>
+                                <div class="usa-checkbox">
+                                    <input
+                                        class="usa-checkbox__input"
+                                        id="includeInterpretationSubRules"
+                                        type="checkbox"
+                                        name="advanced-import-options"
+                                        value="include-interpretation-subRules"
+                                    />
+                                    <label class="usa-checkbox__label" for="includeInterpretationSubRules">Include Interpretation Sub Rules</label>
+                                </div>
+                                <div class="usa-checkbox">
+                                    <input
+                                        class="usa-checkbox__input"
+                                        id="generateRaster"
+                                        type="checkbox"
+                                        name="advanced-import-options"
+                                        value="generate-raster"
+                                        checked="true"
+                                        onchange="enableDisableAdvancedImportOptions()"
+                                    />
+                                    <label class="usa-checkbox__label" for="generateRaster">Generate Raster</label>
+                                </div>
+                                <div class="usa-form padding-left-4" id="override-grid-size-form">
+                                    <label class="usa-label margin-left-1" for="override-grid-size">Override Grid Size:</label>
+                                    <div class="usa-input-group usa-input-group--sm margin-left-1">
+                                      <input
+                                        id="override-grid-size-input"
+                                        class="usa-input"
+                                        aria-label="Override Grid Size in meters"
+                                        value="10"
+                                      />
+                                      <div class="usa-input-suffix" aria-hidden="true">m</div>
+                                    </div>
+                                    <p id="validationTextOverrideGridSize" class="validationText padding-left-1" style="display: none;" role="alert">Input must be an integer greater than 0.</p>
+                                </div>
+                                <p id="advancedOptionsInfoMessage" class="warningMessage"><em>These options are rarely used. Please refer to the <a href="javascript:toggleHelpPaneContent('homePageHelpPaneContent')" id="advancedOptionsHelpBtn" class="helpPaneBtn advancedOptionsHelpMenuBtn usa-tooltip" data-position="bottom" title="Open Help Menu">Help Menu</a> for more information.</em></p>
+                            </div> 
+                        </div>
+                    </div>
+                    <div id="databaseOptionsContainer" class="advancedOptions" style="display: none;">
+                        <button id="deleteBtn" class="usa-button usa-button--big toggleDisableOnLoad" disabled>Delete SSURGO Data</button>
+                        <div id="generateRasterContainer" class="usa-accordion">
+                            <h2 class="usa-accordion__heading margin-left-1">
+                                <button
+                                    type="button"
+                                    id="generateRasterOptionsBtn"
+                                    class="usa-accordion__button spAccordionBtn"
+                                    aria-expanded="false"
+                                    aria-controls="generateRasterOptions"
+                                >
+                                    Generate Raster
+                                </button>
+                            </h2>
+                            <div id="generateRasterOptions" class="usa-accordion__content"> 
+                                <div class="usa-form" id="override-grid-size-form">
+                                    <label class="" for="override-grid-size">Override Grid Size:</label>
+                                    <div class="usa-input-group">
+                                      <input
+                                        id="override-grid-size-input-db"
+                                        class="usa-input"
+                                        aria-label="Override Grid Size in meters"
+                                        value="10"
+                                      />
+                                      <div class="usa-input-suffix" aria-hidden="true">m</div>
+                                    </div>
+                                    <p id="generateRasterValidationText" class="validationText" style="display: none;" role="alert">Input must be an integer greater than 0.</p>
+                                    <button id="generateRasterBtn" class="usa-button" type="button">Generate</button>
+                                </div>
+                            </div> 
+                            <!-- Existing raster modal -->
+                            <span>
+                                <a 
+                                    id="existingRasterBtn"
+                                    class="usa-button"
+                                    aria-controls="existingRasterModal"
+                                    data-open-modal 
+                                    hidden
+                                >
+                                    Existing Raster Modal
+                                </a>
+    
+                                <div
+                                    class="usa-modal"
+                                    id="existingRasterModal"
+                                    aria-labelledby="existingRasterModalTitle"
+                                    aria-describedby="existingRasterModalMessage"
+                                    tabindex="-1" 
+                                    data-force-action
+                                >
+                                    <div class="usa-modal__content">
+                                        <div class="usa-modal__main">
+                                            <h2 class="usa-modal__heading" id="existingRasterModalTitle">
+                                                <!-- Are you sure you want to continue? -->
+                                                <img src="static/images/warningIcon.svg" alt="warning icon">
+                                                There are already rasters in this location 
+                                            </h2>
+                                            <div class="usa-prose">
+                                                <p id="existingRasterModalMessage"></p>
+                                                <p>
+                                                    If you want to keep these files, move them to a different location before continuing. You will need to move the files locally on your machine, not in the SSURGO Portal application.
+                                                    <br><br>
+                                                    If you continue, you will overwrite the existing raster files. Do you want to continue?
+                                                </p>
+                                            </div>
+                                            <div class="usa-modal__footer">
+                                                <ul class="usa-button-group">
+                                                    <li class="usa-button-group__item">
+                                                    <a href="#" class="usa-button usa-button--outline" id="cancelGenerateRaster" data-close-modal onclick="document.getElementById('generateRasterBtn').focus();">Cancel</a>
+                                                    </li>
+                                                    <li class="usa-button-group__item">
+                                                    <button type="button" class="usa-button" id="continueGenerateRaster" data-close-modal>Continue</button>
+                                                    </li>
+                                                </ul>
+                                            </div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            class="usa-button usa-modal__close"
+                                            aria-label="Close this window"
+                                            id="closeExistingRasterModalBtn"
+                                            onclick="document.getElementById('generateRasterBtn').focus();" 
+                                            data-close-modal
+                                        >
+                                            <img src="static/images/closeIcon.svg" alt="close modal">
+                                        </button>
+                                    </div>
+                                </div>
+                            </span>
+                            <!-- End Existing raster modal -->
+                        </div>
+                    </div>
+                    <div id="sdvOptionsContainer" class="advancedOptions" style="display: none;">
+                        <div id="sdvSearch" class="searchIcon mb-2">
+                            <input id="sdvSearchText" class="usa-input" aria-label="Search bar" placeholder="Search folder and ratings">
+                        </div>
+                        <div id="SDVFoldersContainer">
+                            <ul id="SDVFolderList">
+                                <!--This container is populated by JavaScript-->
+                            </ul>
+                        </div>
+                        <button id="viewDataBtn" class="usa-button usa-button--big toggleDisableOnLoad" onclick="generateAggregation()" disabled>Generate Rating</button>
+                        <button id="viewRatingResults" class="usa-button usa-button--outline" onclick="$('#sdvRatingResultsPage, #homePageContainer').toggle()" style="display: none;">Previous Rating Results</button>
+                    </div>
+                </div>
+                <!--End Side menu selection options-->
+                <!-- Table container -->
+                <div class="col-9 subpage-display" role="main">
+                    <div class="grid-row">
+                        <div class="col-12 topHeader subpage-display--header" style="display: flex; justify-content: space-between;">                            
+                            <div include-html="/static/SubComponents/HtmlComponents/usdaLogoAndVersion.html"></div>
+                            <ul id="homeHelpAndContactBtnContainer" class="usa-button-group">
+                                <li class="usa-button-group__item">
+                                    <button type="usa-button usa-button--outline"  tabindex="0" id="toggleHomeHelpPane" class="usa-button usa-button--outline helpPaneBtn usa-tooltip" title="Help Page" data-position="right"
+                                        onclick="toggleHelpPaneContent('homePageHelpPaneContent')">Help
+                                    </button>
+                                </li>
+                                <li class="usa-button-group__item">
+                                    <button type="button" tabindex="0" id="toggleContactUs" style="text-align: left" class="usa-button usa-button--outline helpPaneBtn contactUs usa-tooltip" title="Contact Us" data-position="right"
+                                        onclick="toggleContactUs()">
+                                        Contact Us
+                                    </button>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div id="navPillAndRefreshContainer">
+                        <div class="margin-4">
+                            <button type="button" class="usa-button usa-button--unstyled usa-tooltip toggleDisableOnLoad" id="refreshBtn" data-position="bottom" aria-label="Refresh Import SSURGO Data Table" style="display: none"><img title="Refresh Import SSURGO Data Table" src="/static/images/refreshIcon.svg" class="usa-tooltip" data-position="bottom" alt="Refresh Import SSURGO Data Table"></button>
+                        </div>
+                        <!-- nav-pills to select tables on Home Page -->
+                        <ul class="nav nav-pills mb-3" role="tablist">
+                            <li class="nav-item" role="presentation">
+                            </li>                            
+                            <li class="nav-item" role="presentation">
+                                <button id="importNavLink" class="nav-link active" data-bs-toggle="pill" data-bs-target="#pillsImportTable" type="button" role="tab" aria-controls="pillsImportTable" aria-selected="true">Import SSURGO Data</button>
+                            </li>
+                            <li class="nav-item" role="presentation">
+                                <button id="databaseNavLink" class="nav-link" data-bs-toggle="pill" data-bs-target="#pillsDatabaseTable" type="button" role="tab" aria-controls="pillsDatabaseTable" aria-selected="false">SSURGO Data in Database</button>
+                            </li>
+                            <li class="nav-item" role="presentation">
+                                <button id="sdvNavLink" class="nav-link" data-bs-toggle="pill" data-bs-target="#pillsSdvTable" type="button" role="tab" aria-controls="pillsSdvTable" aria-selected="false">Soil Data Viewer</button>
+                            </li>
+                        </ul>
+                        <!--End nav-pills-->
+                    </div>
+                    <!-- Tables on Home Page -->
+                    <div class="tab-content" aria-live="polite" aria-relevant="additions"> 
+                        <div class="tab-pane fade active show" id="pillsImportTable" role="tabpanel" aria-labelledby="pillsImportTable">
+                            <div id="promptUsersToImport" class="grid-container center-cards" style="flex-direction: column;">
+                                <h3 id="importPromptMessage">We have detected that you have selected an empty database. Please choose one of the options below to add data to your database.</h3>                                  
+                                <div class="grid-row">
+                                    <ul class="usa-card-group">
+                                        <li class="usa-card">
+                                            <div class="usa-card__container">
+                                                <div class="usa-card--header">
+                                                    <h4 class="usa-card__header">Download data from the web</h4>
+                                                </div>
+                                                <div class="usa-card__body" id="downloadFromWebButtonDetails">
+                                                    <p>Download SSURGO data from Web Soil Survey without having to leave SSURGO Portal!</p>
+                                                </div>
+                                                <div class="usa-card__footer">
+                                                    <button class="usa-button downloadFromWebBtn">Download data from the web</button>
+                                                </div>
+                                            </div>
+                                        </li>
+                                        <li class="usa-card">
+                                            <div class="usa-card__container">
+                                                <div class="usa-card--header">
+                                                    <h4 class="usa-card__header">Browse your computer</h4>
+                                                </div>
+                                                <div class="usa-card__body" id="browseSSURGODataDetails">
+                                                    <p>Browse SSURGO files that you already downloaded.</p>
+                                                </div>
+                                                <div class="usa-card__footer">
+                                                    <button id="selectImportFolderCardBtn" class="usa-button" onclick="initializeTreeView('importTreeViewTable', 'pretestimportcandidates')">Browse your computer</button>
+                                                </div>
+                                            </div>
+                                        </li>
+                                    </ul>
+                                </div>
+                            </div>
+                                <!-- start folder location error warning alert  -->
+                                <div class="usa-accordion">
+                                    <button
+                                        type="button"
+                                        id="toggleErrorDiv" 
+                                        class="usa-accordion__button"
+                                        aria-expanded="false"
+                                        aria-controls="errorDiv" 
+                                        style="display: none"
+                                    >
+                                        <div class="usa-alert usa-alert--warning" aria-roledescription="Warning alert. Files inside these folders do not match the structure needed to import.">
+                                            <div id="toggleErrorText" class="usa-alert__body">
+                                              <h2 class="usa-alert__heading">Warning status</h2>
+                                            </div>
+                                        </div>
+                                        <!--Button text is populated by ssurgo_portal_scripts.js-->
+                                    </button>
+                                    <div id="errorDiv"></div>
+                                </div>
+                                <!-- end folder location error warning alert  -->
+                                <!-- start duplicate area symbol alerts  -->
+                                <div class="usa-accordion">
+                                    <button
+                                        type="button"
+                                        id="toggleDuplicateDiv" 
+                                        class="usa-accordion__button"
+                                        aria-expanded="false"
+                                        aria-controls="duplicateDiv" 
+                                        style="display: none"
+                                    >
+                                        <div class="usa-alert usa-alert--info">
+                                            <div id="toggleDuplicateText" class="usa-alert__body">
+                                                <h2 class="usa-alert__heading">Duplicate Area Symbols Found</h2>
+                                            </div>
+                                        </div>
+                                        <!-- Alert button text is populated by ssurgo_portal_scripts.js in setDuplicateToggleDisplay() function -->
+                                    </button>
+                                    <div id="duplicateDiv"></div>
+                                </div>
+                                <!-- end duplicate area symbol alerts  -->
+                                <div id='importTableContainer' class="usa-table-container--scrollable no-text-highlight">
+                                    <div class="loadTableScreen" id="folderLoadingScreen" style="display: none;">
+                                        <div class="spinner-border text-primary" role="status"></div>
+                                        <span>Executing pretests, please wait.</span>
+                                    </div> 
+                                        <!-- Table Data is populated by ssurgo_portal_scripts.js -->
+                                </div>
+                                <div id="folderTableFooter" class="tableFooter">
+                                    <!--Counter is populated by ssurgo_portal_scripts.js-->
+                                    <p id="folderRecordCounter"></p>
+                                </div>
+                        </div>
+                        <div class="tab-pane fade" id="pillsDatabaseTable" role="tabpanel" aria-labelledby="pillsDatabaseTable">
+                            <!-- start outdated SSAs DB notifications  -->
+                            <div class="usa-accordion">
+                                <button
+                                    type="button"
+                                    id="toggleDbOutdatedSsaInfoDiv"
+                                    class="usa-accordion__button"
+                                    aria-expanded="false"
+                                    aria-controls="outdatedInfoDiv" 
+                                    style="display: none"
+                                    >
+                                    <div class="usa-alert usa-alert--info" aria-roledescription="Outdated Soil Survey Area(s) Found. Your database contains outdated soil survey area(s). It is recommended that you delete the data from your database and download newer data.">
+                                        <div id="outdatedDbSsaInfoText" class="usa-alert__body">
+                                          <h2 class="usa-alert__heading">Outdated Soil Survey Area(s) Found</h2>
+                                        </div>
+                                    </div>
+                                    <!--Button text is populated by ssurgo_portal_scripts.js-->
+                                </button>
+                                <div id="outdatedInfoDiv"></div>
+                            </div>
+                            <!-- end outdated SSAs DB notifications  -->
+                            <!-- start no longer existing SSAs DB notifications  -->
+                            <div class="usa-accordion">
+                                <button
+                                    type="button"
+                                    id="toggleDbNonExistingSsaInfoDiv"
+                                    class="usa-accordion__button"
+                                    aria-expanded="false"
+                                    aria-controls="nonExistingSsaInfoDiv" 
+                                    style="display: none"
+                                    >
+                                    <div class="usa-alert usa-alert--info" aria-roledescription="Your database contains soil survey area(s) that no longer exist. If you need help finding replacement data, contact the Soils Hotline. Click this message to view affected areas.">
+                                        <div id="nonExistingDbSsaInfoText" class="usa-alert__body">
+                                          <h2 class="usa-alert__heading">No Longer Existing Soil Survey Area(s) Found</h2>
+                                        </div>
+                                    </div>
+                                    <!--Button text is populated by ssurgo_portal_scripts.js-->
+                                </button>
+                                <div id="nonExistingSsaInfoDiv"></div>
+                            </div>
+                            <!-- end no longer existing SSAs DB notifications  -->
+                            <div id="dbTableContainer" class="usa-table-container--scrollable no-text-highlight">
+                                <!-- Display emptyDatabaseGrayIcon.svg when table is empty -->
+                                <img src="/static/images/emptyDatabaseIcon.svg" alt="Empty Database Gray Icon" id="emptyDatabaseGrayIcon" class="filter-gray"/>
+                                <!-- Table Data is populated by ssurgo_portal_scripts.js -->
+                            </div>
+                            <div id="dbTableFooter" class="tableFooter">
+                                <!--Counter is populated by ssurgo_portal_scripts.js-->
+                                <p id="databaseRecordCounter"></p>                          
+                            </div>
+                        </div>
+                        <div class="tab-pane fade" id="pillsSdvTable" role="tabpanel" aria-labelledby="pillsSdvTable">  
+                            <div id="aggregationLabels"> 
+                                <h2 id="interpTypeName"></h2>                                 
+                                <h3 id="aggregationName" class="hideSdvDescription"></h3>
+                            </div>
+                            <p id="sdvFolderDescription"></p>
+                            <p id="sdvSelectMessage"><strong>Please select a database to perform aggregation.</strong></p>
+                            <div id="sdvRatingOptionsContainer" style="display: none">
+                                <!-- Rating Options are populated by ssurgo_portal_scripts.js -->  
+                                <div id="sdvRatingOptions">
+                                    <div id="sdvRatingOptionsHeaderContainer">
+                                        <h4>Rating Options</h4>
+                                        <button id="sdvRatingOptionsHeaderBtn" type="button" class="usa-button usa-button--unstyled usa-tooltip" title="Toggle SDV Descriptions" aria-label="Toggle SDV Descriptions" onclick="$('#sdvRatingDescriptions').toggle()" data-position="right">
+                                            <img id="sdvRatingOptionsHeaderBtnImg" src="/static/images/infoIcon.svg" class="usa-tooltip", alt="Toggle SDV Descriptions", title="Toggle SDV Descriptions" tabindex="-1" data-position="right">
+                                        </button>
+                                    </div>
+                                    <div id="sdvRequiredOptionsContainer" class="usa-accordion">
+                                        <h5 for="sdvRequiredOptionsContainer">Required</h5>
+                                        <div id="requiredOptionsBody"></div>
+                                    </div>
+                                    <div id="sdvAdvancedOptionsContainer" class="usa-accordion">
+                                        <h5 for="sdvAdvancedOptionsContainer">Advanced</h5>
+                                        <div id="sdvAdvancedOptionsBody"></div></div>
+                                </div>
+                                <!-- Rating Option Descriptions are populated by ssurgo_portal_scripts.js -->
+                                <div id="sdvRatingDescriptions" class="usa-accordion">
+                                    <h4 for="sdvRatingDescriptions">Rating Description</h4>
+                                    <div id="ratingDesc" class="hideSdvDescription">
+                                        <button class="usa-accordion__button" aria-controls="ratingDescText">View Rating Description</button>
+                                        <p id="ratingDescText" class="usa-accordion__content"></p>
+                                    </div>
+                                    <h4 id="ratingOptionsDescHeading" style="display: none; margin-top:3%" class="hideSdvDescription">Rating Option Descriptions</h4>
+                                    <div id="aggMethDescParent" class="hideSdvDescription">
+                                        <button class="usa-accordion__button" aria-controls="aggMethDesc">Aggregation Method</button>
+                                        <div id="aggMethDesc" class="usa-accordion usa-accordion--multiselectable usa-accordion__content" data-allow-multiple></div>
+                                    </div>
+                                    <div id="compPerCutoffDesc" class="hideSdvDescription">
+                                        <button class="usa-accordion__button" aria-controls="compPerCutoffDescText">Component Percent Cuttoff</button>
+                                        <p id="compPerCutoffDescText" class="usa-accordion__content"></p>
+                                    </div>
+                                    <div id="tieBreakRuleDesc" class="hideSdvDescription">
+                                        <button class="usa-accordion__button" aria-controls="tieBreakRuleDescText">Tie Break Rule</button>
+                                        <p id="tieBreakRuleDescText" class="usa-accordion__content"></p>
+                                    </div>
+                                    <div id="interpNullAsZeroDesc" class="hideSdvDescription">
+                                        <button class="usa-accordion__button" aria-controls="interpNullAsZeroDescText">Interpret Nulls as Zeros</button>
+                                        <p id="interpNullAsZeroDescText" class="usa-accordion__content"></p>
+                                    </div>
+                                    <div id="layerOptionsDesc" class="hideSdvDescription">
+                                        <button class="usa-accordion__button" aria-controls="layerOptionsDescText">Layer Options (Horizon Aggregation Method)</button>
+                                        <p id="layerOptionsDescText" class="usa-accordion__content"></p>
+                                    </div>
+                                    <div id="monthRangeDesc" class="hideSdvDescription">
+                                        <button class="usa-accordion__button" aria-controls="monthRagneDescText">Month Range</button>
+                                        <p id="monthRagneDescText" class="usa-accordion__content"></p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!--End Tables on Home Page-->
+                </div>
+                <!--End Table Container-->
+            </div>
+        </div>
+    </div>
+    <!--End Home Page-->
+    <div id="downloadPageContainer" class="subpage-display" style="display: none;" role="dialog">
+        <div class="subpage-display--header">
+            <div style="display: flex; flex-direction: row;">
+                <button class="usa-button usa-button--unstyled" id="downloadPageBackBtn" aria-labelledby="navigateBackToHomeAriaLabel"  onclick="navigateBackToLandingPage('downloadFromWebBtn')">
+                    <img src="/static/images/arrow-left-circle.svg" class="margin-2" alt="Navigate back to the home screen"/>
+                </button>
+                <div include-html="/static/SubComponents/HtmlComponents/usdaLogoAndVersion.html"></div>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr auto 1fr;">
+                <div class="subpage-display--header--multilevel">
+                    <h1>SSURGO Downloader</h1>
+                    <h2>Select soil survey areas to download</h2>
+                </div>
+            </div>
+            <div>
+                <button class="usa-button usa-button--outline helpPaneBtn" onclick="toggleHelpPaneContent('selectLocationOfSsurgoDataFolderHelpPaneContent')">Help</button>
+                <button class="usa-button usa-button--outline helpPaneBtn contactUs" onclick="toggleContactUs()">Contact us</button>
+            </div>
+        </div>
+        <div class="subpage-display--body" id="downloadPageSubPageBody">
+            <div id="downloadOptions">
+                <div id="selectType" class="usa-tabs">  
+                    <label for="selectType" class="usa-label"><h2 id="selectTypeTitle">Select Survey Areas by...</h2></label>
+                    <ul class="usa-accordion">
+                        <li><button class="usa-accordion-button" aria-expanded="true" aria-controls="a1">State/Island</button></li>
+                        <li><button class="usa-accordion-button" aria-expanded="false" aria-controls="a2">Keyword</button></li>
+                        <li><button class="usa-accordion-button" aria-expanded="false" aria-controls="a3">Shapefile</button></li>
+                    </ul>
+                    <div id="a2" class="usa-accordion-content usa-tabs" style="display: none;">
+                        <label class="usa-label" for="keyword" style="margin-top: .5rem; margin-left: .5rem;">Search by Area Name or Area symbol</label>
+                        <div style="display: flex; align-items: center;">
+                            <input class="usa-input" id="keyword" name="keyword" style="margin-bottom: 9px; margin-left: 8px;" />
+                            <button class="usa-button" id="srchButton">Search</button>
+                        </div>
+                    </div>
+                    <div id="a3" class="usa-accordion-content" style="display: none;">
+                        <label class="usa-label" for="file-input-specific">Upload shapefile(s)</label>
+                        <span id="shapeFileHint" class="usa-hint sr-only">Accepted file types are shp and geojson</span>
+                        <!--TODO: Update input to handle .zip files-->
+                        <input
+                            id="file-input-specific"
+                            class="usa-file-input"
+                            type="file"
+                            name="file-input-specific"
+                            aria-describedby="shapeFileHint"
+                            accept=".shp,.geojson"
+                            multiple="multiple"
+                        />
+                    </div>
+                    <div id="a1" class="usa-accordion-content usa-tabs">
+                        <label for="stateSelect" class="'usa-label" id="stateSelect-label">Select a State or Island Group</label>
+                        <div  class="usa-combo-box">
+                            <select class="usa-select" name="stateSelect" id="stateSelect">
+                                <option value>Select a State or Island Group</option>
+                                <option value="AL">Alabama</option>
+                                <option value="AK">Alaska</option>
+                                <option value="AS">American Samoa</option>
+                                <option value="AZ">Arizona</option>
+                                <option value="AR">Arkansas</option>
+                                <option value="CA">California</option>
+                                <option value="CO">Colorado</option>
+                                <option value="CT">Connecticut</option>
+                                <option value="DE">Delaware</option>
+                                <option value="DC">District of Columbia</option>
+                                <option value="FM">Federated States of Micronesia</option>
+                                <option value="FL">Florida</option>
+                                <option value="GA">Georgia</option>
+                                <option value="GU">Guam</option>
+                                <option value="HI">Hawaii</option>
+                                <option value="ID">Idaho</option>
+                                <option value="IL">Illinois</option>
+                                <option value="IN">Indiana</option>
+                                <option value="IA">Iowa</option>
+                                <option value="KS">Kansas</option>
+                                <option value="KY">Kentucky</option>
+                                <option value="LA">Louisiana</option>
+                                <option value="ME">Maine</option>
+                                <option value="MH">Marshall Islands</option>
+                                <option value="MD">Maryland</option>
+                                <option value="MA">Massachusetts</option>
+                                <option value="MI">Michigan</option>
+                                <option value="MN">Minnesota</option>
+                                <option value="MS">Mississippi</option>
+                                <option value="MO">Missouri</option>
+                                <option value="MT">Montana</option>
+                                <option value="NE">Nebraska</option>
+                                <option value="NV">Nevada</option>
+                                <option value="NH">New Hampshire</option>
+                                <option value="NJ">New Jersey</option>
+                                <option value="NM">New Mexico</option>
+                                <option value="NY">New York</option>
+                                <option value="NC">North Carolina</option>
+                                <option value="ND">North Dakota</option>
+                                <option value="MP">Northern Mariana Islands</option>
+                                <option value="OH">Ohio</option>
+                                <option value="OK">Oklahoma</option>
+                                <option value="OR">Oregon</option>
+                                <option value="PW">Palau</option>
+                                <option value="PA">Pennsylvania</option>
+                                <option value="PR">Puerto Rico</option>
+                                <option value="RI">Rhode Island</option>
+                                <option value="SC">South Carolina</option>
+                                <option value="SD">South Dakota</option>
+                                <option value="TN">Tennessee</option>
+                                <option value="TX">Texas</option>
+                                <option value="UT">Utah</option>
+                                <option value="VT">Vermont</option>
+                                <option value="VI">Virgin Islands of the U.S.</option>
+                                <option value="VA">Virginia</option>
+                                <option value="WA">Washington</option>
+                                <option value="WV">West Virginia</option>
+                                <option value="WI">Wisconsin</option>
+                                <option value="WY">Wyoming</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <!--ssa-selector is LitElement that encapsulates downloadContainer-->
+                <ssa-selector id="ssaselector"></ssa-selector>
+
+            </div>
+            <div id="pillsDownloadMap">
+                <div id="noInternetConnectionContainer" style="display: none;" class="downloadMapIssue">
+                    <img src="/static/images/wifi-off.svg" alt="No internet icon">
+                    <p>Unable to connect to download servers</p>
+                    <p>Contact <a href="mailto:SoilsHotline@usda.gov">Soils Hotline</a> for additional support.</p>
+                    <button id="internetTestButton" onclick="checkInternetConnection(true)" class="usa-button usa-button--outline">Retry internet connection</button>
+                </div>
+                <div id="noGeojsonFileContainer" style="display: none;" class="downloadMapIssue">
+                    <img src="/static/images/wifi-off.svg" alt="No internet icon">
+                    <p>Unable to find downloader supporting files. Restarting SSURGO Portal may resolve this issue.</p>
+                    <p>Contact <a href="mailto:SoilsHotline@usda.gov">Soils Hotline</a> for additional support.</p>
+                </div>
+                <div id="downloadMapContainer" style="position: relative; display:none;">
+                    <div class="loadTableScreen downloadSpinner" id="ssaLoadingScreen" style="display: none;">
+                        <div class="spinner-border text-primary" role="status"></div>
+                        <span>Searching Areasymbols, please wait.</span>
+                    </div>
+                    <div id="mapTooltip" style="position: absolute; top: 1rem; left: 50%; transform: translateX(-50%); padding: 0.5rem; background: rgba(0, 0, 0, 0.65); color: white; border-radius: 10px; z-index: 1000">Hover over a soil survey area for selection options.</div>                    
+                    <div class="map-labels" id="mapIt" style="box-sizing: border-box; z-index: 1;"></div>
+                </div>
+            </div>
+        </div>
+        <div class="subpage-display--footer">
+            <ul class="usa-button-group">
+                <li class="usa-button-group__item">
+                    <button class="usa-button usa-button--outline" onclick="$('#downloadPageContainer, #homePageContainer').toggle()">Go back</button>
+                </li>
+                <li class="usa-button-group__item">
+                    <div id="selectedDownloadFolderNameBrowseBtnDiv" data-bs-toggle="tooltip" data-bs-placement="tooltip" title="Please select an SSA to continue.">
+                        <p id="reason" class="visually-hidden">Please select an SSA to continue.</p>
+                        <button type="button" aria-label="Select Download Folder" id="selectedDownloadFolderNameBrowseBtn" class="usa-button margin-right-0" disabled="disabled" aria-disabled="true" aria-describedby="reason" tabindex="0" data-bs-placement="tooltip" title="Please select an SSA to continue." onclick="initializeTreeView('downloadTreeViewTable', 'downloadpath')">
+                            Next
+                        </button>
+                    </div>
+                </li>
+            </ul>
+        </div>
+    </div>
+    <!------------- Help Menu's ------------------->
+    <!--It is important to add the class lastHelpMenuItem to the last tabable item in the help menu bodies for 508 compliance.-->
+    <div class="helpPaneContainer" id="helpPaneContainer" tabindex="0" role="complementary" aria-hidden="true">
+        <div id="helpPaneHeader">
+            <button id="closeHelpMenu" type="button" class="btn" tabindex="0" aria-label="Close">
+                <img src="/static/images/closeIcon.svg" alt="Close button icon"/>
+            </button>
+            <h1>SSURGO Portal Help Page</h1>
+            <button id="expandHelpMenu" type="button" class="btn" tabindex="0" aria-label="Expand Help Menu" status="colapsed">
+                <img src="/static/images/eject-fill.svg" alt="Expand Help Menu icon" style="transform:rotate(-90deg);">
+            </button>
+        </div>
+        <!-- Home Page - Help Pane Content -->
+        <div id="homePageHelpPaneContent" class="helpPageContainer">
+            <div>
+                <div class="containsSubHeaders">
+                    <button data-bs-toggle="collapse" data-bs-target="#leftPaneSubSections" class="btn"><img src="/static/images/caret-up-fill.svg" alt="expand section"></button>
+                    <a href="#landPageHelpLeftMenu">Left Pane Menu</a>
+                    <div id="leftPaneSubSections" class="containsSubHeaders collapse">
+                        <div class="onlyHeader">
+                            <a href="#landPageHelpStepOne">Select or Create a Database</a>
+                        </div>
+                        <div class="containsSubHeaders">
+                            <button data-bs-toggle="collapse" data-bs-target="#selectLocationSubHeaders" class="btn"><img src="/static/images/caret-up-fill.svg" alt="expand section"></button>
+                            <a href="#landPageHelpStepTwo">Select Folder of SSURGO Data</a>
+                            <div id="selectLocationSubHeaders" class="collapse">
+                                <div class="containsSubHeaders">
+                                    <button data-bs-toggle="collapse" data-bs-target="#typesOfDataSubHeaders" class="btn"><img src="/static/images/caret-up-fill.svg" alt="expand section"></button>
+                                    <a href="#landPageHelpTypesOfData">Types of SSURGO Data</a>
+                                    <div id="typesOfDataSubHeaders" class="collapse">
+                                        <div class="onlyHeader"><a href="#landPageHelpStandardData">Standard SSURGO data package</a></div>
+                                        <div class="onlyHeader"><a href="#landPageHelpAOIData">Area of Interest data package</a></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="containsSubHeaders">
+                            <button data-bs-toggle="collapse" data-bs-target="#importDataLeftPaneSubHeaders" class="btn"><img src="/static/images/caret-up-fill.svg" alt="expand section"></button>
+                            <a href="#landPageHelpImportDataLeftPane">Import SSURGO Data</a>
+                            <div id="importDataLeftPaneSubHeaders" class="collapse">
+                                <div class="onlyHeader"><a href="#landPageHelpValidations">Area Symbol Validations</a></div>
+                            </div>
+                        </div>
+                        <div class="containsSubHeaders">
+                            <button data-bs-toggle="collapse" data-bs-target="#advancedOptionsSubHeaders" class="btn"><img src="/static/images/caret-up-fill.svg" alt="expand section"></button>
+                            <a href="#landPageHelpAdvancedOptions">Advanced Options</a>
+                            <div id="advancedOptionsSubHeaders" class="collapse">
+                                <div class="onlyHeader"><a href="#landPageHelpLoadTab">Load Tabular Data Only</a></div>
+                                <div class="onlyHeader"><a href="#landPageHelpDisableDisolve">Disable Disolve</a></div>
+                                <div class="onlyHeader"><a href="#landPageHelpSubRules">Load Interpretation Sub Rules</a></div>
+                            </div>
+                        </div>
+                        <div class="onlyHeader"><a href="#landPageHelpDelete">Delete SSURGO Data</a></div>
+                    </div>
+                </div>
+                <div class="containsSubHeaders">
+                    <button data-bs-toggle="collapse" data-bs-target="#mainWindowSubSections" class="btn"><img src="/static/images/caret-up-fill.svg" alt="expand section"></button>
+                    <a href="#landPageHelpMainWindow">Main Window</a>
+                    <div id="mainWindowSubSections" class="containsSubHeaders collapse">
+                        <div class="containsSubHeaders">
+                            <button data-bs-toggle="collapse" data-bs-target="#landingPageImportDataSubSections" class="btn"><img src="/static/images/caret-up-fill.svg" alt="expand section"></button>
+                            <a href="#landPageHelpImportData">Import SSURGO Data Button</a>
+                            <div id="landingPageImportDataSubSections" class="collapse">
+                                <div class="onlyHeader"><a href="#landPageHelpImportDataColumns">Import SSURGO Data Columns</a></div>
+                                <div class="onlyHeader"><a href="#landPageHelpPreTests">Pretests</a></div>
+                                <div class="onlyHeader"><a href="#landPageHelpDuplicateWarning">Duplicate Area Symbol Precheck Warnings</a></div>
+                                <div class="onlyHeader"><a href="#landPageHelpRefreshTable">Refresh Import SSURGO Data Table</a></div>
+                            </div>
+                        </div>
+                        <div class="containsSubHeaders">
+                            <button data-bs-toggle="collapse" data-bs-target="#landingPageDatabaseTableSubHeaders" class="btn"><img src="/static/images/caret-up-fill.svg" alt="expand section"></button>
+                            <a href="#landPageHelpDatabaseTable">SSURGO Data in Database</a>
+                            <div id="landingPageDatabaseTableSubHeaders" class="collapse">
+                                <div><a href="#landPageHelpDatabaseColumns">SSURGO Data in Database Columns</a></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <section> <!--H2 section-->
+                <h2 id="landPageHelpLeftMenu">Left Pane Menu</h2>
+                <p>The Left Pane Menu allows you to do the following:
+                    <ol>
+                        <li>Select an existing SQLite SSURGO Template database or create a new SQLite SSURGO Template database.</li>
+                        <li>Select the location of SSURGO data.</li>
+                        <li>Import SSURGO data into SSURGO SQLite Template database.</li>
+                        <li>Delete existing SSURGO data from an SQLite SSURGO Template database.</li>
+                        <li>Select Advanced Options prior to importing for special use cases.</li>
+                    </ol>
+                </p>
+                    <h3 id="landPageHelpStepOne">Step 1: Select or Create a Database</h3>
+                    <p>The SQLite SSURGO Template database needs to be identified before any data can be imported to or deleted from a database. 
+                        In this step, you select an existing SQLite SSURGO Template database or create a new SQLite SSURGO Template database. 
+                        Clicking “Browse” takes you to another screen to select an existing database or create a database. 
+                        After you select or create a database, you are returned to the main screen, and the label above the step 1 box has changed to “Change or Create a Database.”
+                        <br><br>
+                        Refer to the help menu on the Select or Create a Database page for more information.
+                        </p>
+                    <h3 id="landPageHelpStepTwo">Step 2: Select Folder of SSURGO Data</h3>
+                    <p>SSURGO Portal needs to know the location of your local folder that contains SSURGO data (i.e., SSURGO data packages) 
+                        before data can be imported into the template database. In this step, you identify the location of the folder that contains SSURGO data. 
+                        Clicking “Browse” takes you to another screen to select the location of the folder containing your SSURGO data. 
+                        After selecting the location, you are returned to the main page, and the label above the step 2 box has changed to “Change Location of SSURGO Data.”
+                        <br><br>
+                        Refer to the help menu on the Select Folder of SSURGO Data for more information.
+                        <br><br>
+                        SSURGO data packages are typically acquired by downloading them as zip files from Web Soil Survey. 
+                        The downloads must be unzipped to your local folder before you can begin importing SSURGO data.
+                        <br><br>
+                        This folder can be named anything, created anywhere, and may contain many SSURGO data packages (i.e., many downloads from Web Soil Survey). 
+                        It is strongly recommended that you only have SSURGO data in this folder. 
+                        After selecting the location, a hidden series of quality assurance pretests are run against your SSURGO data to ensure it has the correct schema. 
+                        See <a href="#landPageHelpPreTests">Pretests</a> section of the help menu for more information about these checks.  
+                        </p>
+                        <h4 id="landPageHelpTypesOfData">Types of SSURGO Data</h4>
+                        <p>Two types of SSURGO data packages are available for download on Web Soil Survey, and SSURGO Portal will support both.
+                            <h5 id="landPageHelpStandardData">Standard SSURGO data package</h5>
+                            <ul>
+                                <li>Delivered for a single soil survey area.</li>
+                                <li>
+                                    Soil survey areas are typically delivered for each county in the United States, but some soil survey areas span multiple counties because 
+                                    they are designed for special areas, such as tribal owned lands, National Parks, or National Forests. 
+                                </li>
+                            </ul>
+                            <h5 id="landPageHelpAOIData">Area of Interest data package</h5>
+                            <ul>
+                                <li>Web Soil Survey allows users to create custom AOIs and then download SSURGO for that AOI.</li>
+                                <li>AOI SSURGO is only available for download after an AOI is created on Web Soil Survey.</li>
+                                <li>AOI SSURGO can include portions of more than one soil survey area.</li>
+                            </ul>
+                            Note for USDA employees, SSURGO Portal supports internal USDA SSURGO exported from the National Soil Information System (NASIS) database 
+                            and SSURGO data downloaded from the Staging Server. However, this requires you to reformat spatial data and create some additional folders 
+                            before importing this SSURGO data.
+                        </p>
+                    <h3 id="landPageHelpImportDataLeftPane">Import SSURGO Data</h3>
+                    <p>SSURGO data is only able to be imported after a template database has been selected, the location of the SSURGO data is identified, 
+                        and at least one record is selected in the “Import SSURGO Data” table. The “Import SSURGO Data” button is only visible when you 
+                        are viewing the “Import SSURGO Data” table in the main window. Clicking this button initiates the import process of any selected 
+                        SSURGO data into the selected template database. After you click this button, you are taken to another screen that shows the status of the import process. 
+                        <h4 id="landPageHelpValidations">Area Symbol Validations</h4>
+                        <p>SSURGO data is organized by soil survey areas, and each survey area has a unique area symbol. Duplicate area symbols are not allowed in the 
+                            SQLite SSURGO Template Database, and SSURGO Portal detects instances of duplications. If duplications are selected and the “Import SSURGO Data” 
+                            button is clicked, an error message will appear.
+                            <br><br>
+                            When importing SSURGO data, two area symbol validation checks are executed prior to the start:
+                            <ol>
+                                <li>SSURGO Portal reviews the selected template database to see if any of the area symbols you are trying to import already exist in the database.
+                                    <ul>
+                                        <li>For example, you are trying to import area symbol OR021, but OR021 is already in your template database. If this
+                                            occurs, you will receive
+                                            a warning message with the option to proceed. Proceeding with the import will delete the existing version of
+                                            OR021 in the template database
+                                            and replace it with the new one.</li>
+                                    </ul>
+                                </li>
+                                
+                                <li>SSURGO Portal reviews the SSURGO data you are trying to import for duplicate area symbols.
+                                    <ul>
+                                        <li>For example, the SSURGO data you selected for import somehow has two instances of area symbol OR021.
+                                    
+                                            <ul>
+                                                <li>Initially, the duplicated data will be flagged in the “Import SSURGO Data” table, and a warning message
+                                                    will
+                                                    appear at the top of the table.</li>
+                                                <li>Subsequently, if you attempt to import both instances of OR021 you will receive an error message.</li>
+                                            </ul>
+                                        </li>
+                                    </ul>
+                                </li>
+                                
+                            </ol>
+                            SSURGO contains version dates, which are the dates the data is published. It is recommended that you consider the version dates of the 
+                            two area symbols and the Exists in Database column when reconciling duplicate area symbols. Typically, you will want the area symbol with 
+                            the most current version date.
+                        </p>
+                    </p>
+                    <h3 id="landPageHelpAdvancedOptions">Advanced Options</h3>
+                    <p>You can typically ignore advanced options. These options are rarely used and are designed for special use cases. 
+                        <br><br>
+                        They are only visible when you are viewing the “Import SSURGO Data” table in the main window. 
+                        <br><br> 
+                        There are three advanced options:
+                        <ol>
+                            <li>Load Tabular Data Only</li>
+                            <li>Disable Dissolve</li>
+                            <li>Include Interpretation Sub Rules</li>
+                        </ol>
+                    </p>
+                        <h4 id="landPageHelpLoadTab">Load Tabular Data Only</h4>
+                        <p>By default, SSURGO Portal imports spatial and tabular SSURGO into the selected template database. Selecting this option will only import 
+                            the SSURGO tabular data. This option was mainly included for internal USDA employees who have special use cases that require tabular only data. 
+                            However, anyone can use it. </p>
+                        <h4 id="landPageHelpDisableDisolve">Disable Disolve</h4>
+                        <p>By default, the polygons in the soilmu_a_XXXX.shp file are dissolved on the “MUKEY” column during import.  Selecting this option removes the dissolving function.
+                            <br><br>
+                            Dissolving significantly reduces the number of records in the SQLite SSURGO Template database mupolygon table and improves performance of this layer in GIS software.
+                                Removing the dissolve will increase the database sizes. It will also make draw times, joins, relates, and selections take longer in GIS.
+                            <br><br>
+                            Dissolving does not result in any data loss.
+                        </p>
+                        <h4 id="landPageHelpSubRules">Load Interpretation Sub Rules</h4>
+                        <p>
+                            By default, the sub rules used to create soil interpretations are not imported. Selecting this option will import the sub rules.
+                            <br><br>
+                            Soil interpretations reside in the component interpretation table (i.e., cointerp table). The interpretations consist of a main 
+                            parent rule and a series of sub rules (i.e., child) nested on the main rule. The main rule is the final interpretation rating for 
+                            a component, and main rules always are included during the import process. The sub rules were used to create the final rating and 
+                            can provide information about what drove the final rating. Typically, they are not needed, and by default, SSURGO Portal does not import the sub rules.
+                            <br><br> 
+                            Including them will not affect the data, but it will increase the size the template database by 150%, slow import times, and negatively impact the user 
+                            experience when working the component interpretation table.
+                        </p>
+                    <h3 id="landPageHelpDelete">Delete SSURGO Data</h3>
+                    <p>
+                        This button is only visible when you are viewing the “SSURGO Data in Database” table in the main window. It initiates the delete of SSURGO data that 
+                        was selected in the SSURGO data in Database table. The selected SSURGO data will be completely deleted from the SQLite SSURGO Template database. 
+                        <strong>Deletes are final, and there is no option to undo a delete.</strong>
+                        <br><br>
+                        Clicking this button takes you to another screen that shows the status of the delete process. 
+                        <br><br>
+                        SSURGO data is grouped by area symbols, and <strong>when you delete an area symbol, you delete all data associated with that area symbol.</strong> 
+                        For example, area symbol OR021 is used for the Gilliam County, Oregon, SSURGO data. The OR021 area symbol contains numerous tabular and spatial 
+                        tables, and when you delete OR021, you delete all data associated with OR021. 
+                    </p>
+            </section>
+            <section><!--H2 section-->
+                <h2 id="landPageHelpMainWindow">Main Window</h2>
+                <p>
+                    The main part of the screen, or the main window, allows you to do the following:
+                    <ol>
+                        <li>Select SSURGO data for import into the SQLite SSURGO Template database.</li>
+                        <li>View and delete the contents of the SQLite SSURGO Template database.</li>
+                    </ol>
+                </p>
+                    <h3 id="landPageHelpImportData">Import SSURGO Data Button</h3>
+                    <p>
+                        The “Import SSURGO Data” table is empty by default. The table will become populated after you complete step 2 on the Left Pane Menu 
+                        and after <a href="#landPageHelpPreTests">Pretests</a> are run against the folder selected in step 2. 
+                        <br><br>
+                        The “Import SSURGO Data” table displays all valid SSURGO <strong>Soil Survey Areas (SSAs)</strong> that are present in your SSURGO data folder. 
+                        You can use this table to select SSAs that you would like to import into your SSURGO database. If you want to select all SSAs for import, 
+                        click the “Select All” checkbox at the top left of the table. After you make your selections, click the “Import SSURGO Data” button to 
+                        begin the import process.
+                        <br><br>
+                        The “Import SSURGO Data” table contains seven columns, which are listed and defined below:
+                    </p>
+                        <h4 id="landPageHelpImportDataColumns">Import SSURGO Data Columns</h4>
+                        <p>
+                            The seven columns in the “Import SSURGO Data” table provide information about the names, symbols, and version dates of the SSURGO data 
+                            being considered for import into the template. They also identify instances where data already exists in the database.   
+                        </p>
+                        <ol>
+                            <li><strong>Select or Deselect</strong>
+                                <ul>
+                                    <li>This column allows you to select or deselect SSURGO data for import into the SQLite SSURGO Template database.
+                                    </li>
+                                    <li>Click the check box to select or deselect SSURGO data.</li>
+                                    <li>A check mark icon will appear when you have selected SSURGO data, and the check mark is absent when it is
+                                        deselected.</li>
+                                    <li>SSURGO data is deselected by default.</li>
+                                    <li>You can click the box at the top of this column to select or deselect all SSURGO data in the table.</li>
+                                </ul>
+                            </li>
+                            <li><strong>Folder Name</strong>
+                                <ul>
+                                    <li>This is the name of the folder that contains the SSURGO spatial and tabular data.</li>
+                                    <li>This folder is a child folder of the directory you selected in step 2 on the Left Pane Menu. Put another way, it
+                                        exists inside the folder selected in step 2.</li>
+                                    <li>For standard SSURGO downloaded from Web Soil Survey (non-AOI SSURGO), the folder name will typically be the area
+                                        symbol for the SSA,
+                                        and it will match the area symbol in column 3. However, this folder can be named anything.</li>
+                                    <li>For AOI SSURGO (non-standard SSURGO), the folder name will start with wss_aoi_ and will be followed by a date.
+                                        For example, “wss_aoi_2022-04-29_14-31-23”. This folder can be named anything.</li>
+                                </ul>
+                            </li>
+                            
+                            <li><strong>Area Symbol</strong>
+                                <ul>
+                                    <li>This is the official area symbol used for the soil survey area. </li>
+                                    <li>This area symbol is derived from the areasymbol column in the sacatalog table, which resides in the tabular
+                                        folder.</li>
+                                    <li>If more than one area symbol exists in a single SSURGO data package, you will see one folder name in column 2
+                                        and multiple area symbols in this column.</li>
+                                    <li>For standard SSURGO downloaded from Web Soil Survey (non-AOI SSURGO), the folder name in column 2 will
+                                        typically be the area symbol and will match the area symbol in this column.</li>
+                                    <li>For AOI SSURGO (non-standard SSURGO), the area symbol(s) will appear in this column, and it will NOT match the
+                                        folder name in column 2.</li>
+                                </ul>
+                            </li>
+                            
+                            <li><strong>Area Name</strong>
+                                <ul>
+                                    <li>This is the official area name for the SSURGO data that exists in the folder listed in column 2.</li>
+                                    <li>This area name is derived from the areaname column in the sacatalog table, which resides in the tabular folder.
+                                    </li>
+                                </ul>
+                            </li>
+                            
+                            <li><strong>Folder SSURGO Version Date</strong>
+                                <ul>
+                                    <li>The version date is the date the SSURGO data package was published. It is the date for the SSURGO data that
+                                        resides in the folder you identified in step 2.</li>
+                                    <li>Each area symbol can have a unique version date.</li>
+                                    <li>The date is derived from the saversion column in the sacatalog table, which resides in the tabular folder.</li>
+                                </ul>
+                            </li>
+                            
+                            <li><strong>Exists in Database</strong>
+                                <ul>
+                                    <li>This column is used to indicate if an area symbol already exists in the SQLite SSURGO Template database.
+                                        If the area symbol exists, one of two possible symbols appears in the column. </li>
+                                    <li>The green check mark indicates that the area symbol exists in the template database and the
+                                        version date in the template matches the version date of the SSURGO data in the folder you selected in step 2.
+                                    </li>
+                                    <li>The yellow warning icon indicates that the area symbol exists in the template database and the version date in
+                                        the template
+                                        DOES NOT match the version date of the SSURGO data in the folder you selected in step 2.</li>
+                                    <li>If no icon appears in the column, it means the area symbol is NOT in your selected template database.</li>
+                                    <li>If an area symbol exists in the template, and you proceed with importing the same area symbol, it will delete
+                                        all SSURGO data from the template for that area symbol and replace it with the data you selected for import.
+                                    </li>
+                                </ul>
+                            </li>
+                            
+                            <li><strong>Database SSURGO Version Date</strong>
+                                <ul>
+                                    <li>This is the version date of the SSURGO data that already exists in your SQLite SSURGO Template database. The
+                                        version date is the date the SSURGO data was published.</li>
+                                    <li>Each area symbol can have a unique version date.</li>
+                                    <li>The date is derived from the template database saversion column in the sacatalog table, which resides in the
+                                        tabular folder.</li>
+                                    <li>A date only appears in this column if an area symbol in column 3 (area symbol column) already exists in the
+                                        template database.
+                                        If it does not exist in the template, the column is left blank.</li>
+                                </ul>
+                            </li>
+                        </ol>
+                        <h4 id="landPageHelpPreTests">Pretests</h4>
+                        <p>
+                            When the folder containing SSURGO data is selected or changed on the Left Pane Menu, a series of pretests are run against the contents of the folder. 
+                            The pretests identify any data that will fail during the import process ahead of time. The tests evaluate all child folders in the selected SSURGO 
+                            data folder and flags any folders that fail one of the following validations:
+                            <ol>
+                                <li>Missing tabular folder. <sup>a</sup></li>
+                                <li>Missing sacatalog.txt file in tabular folder.</li>
+                                <li>SSURGO version in version.txt, in tabular folder, does not match SQLite SSURGO Template SSURGO version.</li>
+                                <li>Missing spatial folder. <sup>a, b</sup></li>
+                                <li>Coordinate system of data in the spatial folder is not WGS84 (EPSG 4326). <sup>b</sup></li>
+                                <li>Empty sapolygon in the spatial folder. <sup>b</sup></li>
+                                <li>Empty mupolygon layer in the spatial folder. <sup>b</sup></li>
+                            </ol>
+                            <sup>a</sup> Folder name must be lowercase. <br>
+                            <sup>b</sup> This pretest does not run when “Load Tabular Only” is selected in the Advanced Options.
+                            <br><br>
+                            The “Import SSURGO Data” table only displays those folders that pass the pretests. Any folder that fails the pretests will be identified 
+                            in the error list at the top of the table. If an error list is not shown above the table, all of your folders passed the pretests. 
+                        </p>
+                        <h4 id="landPageHelpDuplicateWarning">Duplicate Area Symbol Precheck Warnings</h4>
+                        <p>
+                            When the folder containing SSURGO data is selected or changed on Left Pane Menu, the SSURGO data is evaluated for instances of duplicate 
+                            area symbols. Area symbols must be unique in the SQLite SSURGO Template Database, and this evaluation alerts you if an area symbol is duplicated 
+                            in the folder containing SSURGO. If a folder with a duplicate area symbol is detected, a warning message is presented at the top of the table, 
+                            but the area symbols are still presented in the Import SSURGO data table. These folders will also display a warning message in the Folder Name column.
+                        </p>
+                        <h4 id="landPageHelpRefreshTable">Refresh Import SSURGO Data Table</h4>
+                        <p>
+                            When the folder containing SSURGO data is selected or changed on Left Pane Menu, SSURGO Portal runs the pretests against the selected SSURGO 
+                            data folder again. If you make modifications to the data (i.e., update, add, or delete) in your SSURGO data folder outside of the application, 
+                            the application will not automatically notice your changes. To refresh the User Interface, you must click the “Refresh” button next to the 
+                            “Import SSURGO Data” button in the main window. This will also re-execute pretests and will reflect the modifications you made to your SSURGO data folder.
+                        </p>
+                    <h3 id="landPageHelpDatabaseTable">SSURGO Data in Database</h3>
+                    <p>
+                        This table presents you with an inventory of any SSURGO data that exists in your selected SQLite SSURGO Template database, and it allows you to delete SSURGO data 
+                        from your selected database. The table is empty by default. To populate the table, you need to either import data into your selected database from the 
+                        “Import SSURGO Data” tab or select a database that already contains SSURGO data.
+                        <br><br>
+                        You can delete one or more SSURGO soil survey areas from a template database by checking the box on the left side of the table and then clicking the 
+                        “Delete SSURGO Data” button, which is located on the Left Pane Menu. If you want to delete all SSURGO data in your selected database, you can check 
+                        the box at the top left of the table to select all SSURGO data in the database.  
+                        <br><br>
+                        Selecting all SSURGO data in your database and clicking the “Delete SSURGO Data” button on the Left Pane Menu will result in a warning pop-up. Click 
+                        the “Continue” button on the pop-up to delete all data. 
+                        <br><br>
+                        <strong>While you can delete all data in the template database, it is recommended you instead create a brand-new empty template database.</strong>
+                        <br><br>
+                        The “SSURGO Data in Database” table contains five columns, which are listed and defined below.
+                    </p>
+                        <h4 id="landPageHelpDatabaseColumns">SSURGO Data in Database Columns</h4>
+                        <p>
+                            The five columns in the “Import SSURGO Data” table provide information about the names, symbols, and version dates of SSURGO data that exists 
+                            in the SQLite SSURGO Template database. They also identify instances where data already exists in the database.   
+                            <ol>
+                                <li><strong>Select or Deselect</strong>
+                                <ul>
+                                    <li>This column allows you to select or deselect SSURGO data for deletion from the SQLite SSURGO Template database.
+                                    </li>
+                                    <li>Click the check box to select or deselect SSURGO data. </li>
+                                    <li>A check mark icon will appear when you have selected SSURGO data, and the check mark is absent when it is
+                                        deselected.</li>
+                                    <li>SSURGO data is deselected by default.</li>
+                                    <li>You can click the box at the top of this column to select or deselect all SSURGO data in the table.</li>
+                                </ul></li>
+                                
+                                <li><strong>Area Symbol</strong>
+                                <ul>
+                                    <li>This is the official area symbol used for the soil survey area.</li>
+                                    <li>This area symbol is derived from the areasymbol column in the sacatalog table in the template database.</li>
+                                </ul></li>
+                                
+                                <li><strong>Name</strong>
+                                <ul>
+                                    <li>This is the official area name for the SSURGO data that exists in the folder listed in column 2.</li>
+                                    <li>This area name is derived from the areaname column in the sacatalog table in the template database.</li>
+                                </ul></li>
+                                
+                                <li><strong>SSURGO Version Date</strong>
+                                <ul>
+                                    <li>This is the version date of the SSURGO data in the template database. The version date indicates the date the
+                                        SSURGO data was published by the USDA.</li>
+                                    <li>Each area symbol can have a unique version date.</li>
+                                    <li>The date is derived from the saversion column in the sacatalog table, which is in the template database.</li>
+                                </ul></li>
+                                
+                                <li><strong>Tabular Only</strong>
+                                <ul>
+                                    <li>If a blue check mark appears, then only tabular data exists for the area symbol.</li>
+                                    <li>Typically, this column will be empty.</li>
+                                    <li>SSURGO data is composed of both tabular and spatial data, and typically, both tabular and spatial data are
+                                        imported
+                                        into the SQLite SSURGO Template database for a given area symbol. However, special use cases exist where you may
+                                        only require tabular data,
+                                        and the spatial data is omitted.</li>
+                                </ul></li>
+                                
+                            </ol>
+                        </p>
+                        <a href="#closeHelpMenu" class="lastHelpMenuItem">Return to top</a>
+            </section>
+        </div>
+        <!-- Select or Create Database Page - Help Pane Content -->
+        <div id="selectOrCreateDatabaseHelpPaneContent" class="helpPageContainer"> 
+            <div>
+                <div class="onlyHeader"><a href="#pageOverviewDatabaseHelpSection">Page Overview</a></div>
+                <div class="containsSubHeaders">
+                    <button data-bs-toggle="collapse" data-bs-target="#setFilePathOfDatabaseSubHeaders" class="btn"><img src="/static/images/caret-up-fill.svg" alt="expand section"></button>
+                    <a href="#setFilePathDatabaseHelpSection">Set File Path of Database</a>
+                    <div id="setFilePathOfDatabaseSubHeaders" class="collapse">
+                        <div class="onlyHeader"><a href="#databaseManualPathHelpSection">Manually edit file path</a></div>
+                        <div class="onlyHeader"><a href="#databaseBrowsePathHelpSection">Browse through folders in the table below this section to move forward</a></div>
+                        <div class="onlyHeader"><a href="#databaseNavigatePathHelpSection">Click on folder in path to move backwards</a></div>
+                    </div>
+                </div>
+                <div class="containsSubHeaders">
+                    <button data-bs-toggle="collapse" data-bs-target="#createDatabaseHelpSubHeaders" class="btn"><img src="/static/images/caret-up-fill.svg" alt="expand section"></button>
+                    <a href="#createDatabaseHelpSection">Create a New Database</a>     
+                    <div id="createDatabaseHelpSubHeaders" class="collapse">
+                        <div class="onlyHeader"><a href="#newDatabaseNameHelpSection">New Database Name</a></div>
+                        <div class="containsSubHeaders">
+                            <button data-bs-toggle="collapse" data-bs-target="#databaseTypeSubHeaders" class="btn"><img src="/static/images/caret-up-fill.svg" alt="expand section"></button>
+                            <a href="#newDatabaseTypeSection">Choose Database Type</a>
+                            <div id="databaseTypeSubHeaders" class="collapse">
+                                <div class="onlyHeader"><a href="#internalDatabaseOptionsSection">Internal NRCS Employee Options</a></div>
+                            </div>
+                        </div>                        
+                    </div>               
+                </div>
+                <div class="onlyHeader"><a href="#selectDatabaseHelpSection">Select an Existing Database</a></div>
+            </div>
+            <h2 id="pageOverviewDatabaseHelpSection">Page Overview</h2>
+            <p> SSURGO Portal requires the location of an SQLite SSURGO template database before any SSURGO data can be imported or deleted from a template database. 
+                This page allows you to create a new template database or identify the location of an existing template database. Normally, if it is the first time you 
+                are suing SSURGO Portal, you will need to create a new template database and place it in a folder of your choice, thus identifying the location. 
+                However, other use cases exist where you will want to select a preexisting template database and identify its location. 
+                <br><br>
+                You must complete the following two steps on this page to identify the location of an SQLite SSURGO template database: 
+                <ol>
+                    <li>Set File Path of the Folder where the new template database will be located or where the existing template database is located.</li>
+                    <li>Do one of the following:
+                        <ul>
+                            <li><strong>Create a new</strong> template database, which will add it to the folder identified in step 1.</li>
+                            <li><strong>Select an existing</strong> template database from a folder identified in step 1.</li>
+                        </ul>
+                    </li>
+                    
+                </ol>
+                After you complete step 2, you are returned to the original landing page and can proceed to the importing or deleting SSURGO data.
+            </p>
+            <h2 id="setFilePathDatabaseHelpSection">Set File Path of Database</h2>
+            <p>
+                This section allows you to identify the path to the folder where an existing template database is located or where the new database will be created. 
+                The folder contents will be displayed in the table below this section. Only folders and files with the .gpkg or .sqlite extensions will appear in the table. 
+                The GeoPackage version of the SQLite SSURGO Template database uses the .gpkg extension, and SpatiaLite version uses the .sqlite extension.
+                <br><br>
+                Upon initial use, SSURGO Portal will default the path to the C drive. Upon subsequent use, SSURGO Portal will default the path to the location identified 
+                the last time the application was used. This path will default back to the C: drive when your browser cookies are cleared.
+                <br><br>
+                You can change the path one of three ways: 
+                <h3 id="databaseManualPathHelpSection">1. Manually edit file path</h3>
+                <p>To manually edit the path, click on the pencil icon located on the far right of the file path. After clicking the pencil icon, you either type or paste in a new path. 
+                    When you are done editing the file path, click the black X on the far right to complete the change.
+                    <br><br>
+                    This is also where you can change the drive letter. Upon initial use, the application defaults to your C: drive, but you can manually change it any other drive letter (e.g., D:\, E:\).
+                </p>
+                <h3 id="databaseBrowsePathHelpSection">2. Browse through folders in the table below this section to move forward</h3>
+                <p>
+                    You can change the path by clicking on folders in the table below this section.
+                </p>
+                <h3 id="databaseNavigatePathHelpSection">3. Click on folder names or drive letter within the path to move backwards</h3>
+                <p>
+                    You can click on any folder name or the drive letter within the file path to move back through folders. For example, you see the file path <em>C: > SSURGO Poral > Databases > Oregon.</em> 
+                    This path will show you the contents of the Oregon folder in the table below, but you can click directly on the word <em>Databases</em> in the path name to change location to 
+                    <em>C: > SSURGO Portal > Databases.</em>
+                </p>
+            </p>
+            <h2 id="createDatabaseHelpSection">Create a New Database</h2>
+            <p> To create a new database, click the button at the bottom of the page titled “Click to Create New Database.” 
+                <br><br>
+                A pop-up window titled “Create New Database” will appear after clicking this button. This window allows you to choose the database type and name the database. 
+                <h3 id="newDatabaseNameHelpSection">New Database Name</h3>
+                <p>
+                    You can enter any name, and you do not need to enter the file extension. If the name you enter already exists, you will be presented a warning message 
+                    and with the option to override the existing database. 
+                </p>
+                <h3 id="newDatabaseTypeSection">Choose Database Type</h3>
+                <p>
+                    Two options are presented for database type:
+                    <ol>
+                        <li>SpatiaLite</li>
+                        <li>GeoPackage</li>
+                    </ol>
+                    <p>
+                        Both template types are valid options, and you will not notice much difference in the resultant database. However, SpatiaLite and GeoPackage contain 
+                        different schemas designed for storing spatial data in a template database. This means they have different sets of tables and columns required for storing spatial information. 
+                        Currently, SSURGO Portal includes both schemas for those familiar with SQLite files. SpatiaLite is the older schema, and GeoPackage is the newer schema.
+                    </p>
+                    <h4 id="internalDatabaseOptionsSection">Internal NRCS Employee Options</h4>
+                    <p>
+                        This section is rarely used, and it is only intended for internal USDA-NRCS staff. It allows you to select special versions of the SQLite SSURGO Template database. 
+                        In these special versions, most primary keys are defined as TEXT data type. This contrasts with the normal templates, where the primary keys are almost entirely INT data type. 
+                        These special versions are designed explicitly for SSURGO data created from the non-public facing NASIS and Staging databases (i.e., Staging Server). Due to database schemas, 
+                        SSURGO data from these two databases creates numerous primary keys with colons, and these keys must be defined as a TEXT data type. For example, a key value may look like 895671:674348.
+                        <br><br>
+                        To create these special versions:
+                        <ol>
+                            <li>Click “Internal NRCS Employee Options” at the bottom right of the page. </li>
+                            <li>Check the box next to “Click to enable database options for SSURGO from NASIS or Staging Server before creating a new database.”</li>
+                            <li>Click the button labeled “Click to Create New Database” on the bottom left of the page.
+                                <ul>
+                                    <li>The special versions for SSURGO NASIS and Staging Server will be presented in the “Choose Database Type” drop
+                                        list, and the normal versions will not be listed.</li>
+                                    <li>You can identify the special versions because they include “for SSURGO from NASIS or Staging” in parentheses.
+                                    </li>
+                                </ul>
+                            </li>
+                            
+                        </ol>
+                        To make the normal versions available again, close the “Create New Database” window, and uncheck the box next to “Click to enable database options for SSURGO from NASIS or 
+                        Staging Server before creating a new database.” The normal versions will appear the next time you click “Click to Create New Database” button. 
+                    </p>
+                    Once you have named a database and selected the database type, click the “Save Database” button. This will create the new database in the file path you selected, and it will return you to the main page. 
+                </p>
+            </p>
+            <h2 id="selectDatabaseHelpSection">Select an Existing Database</h2>
+            <p>
+                To select an existing SQLite SSURGO Template database, browse to the location of the database and select it from the table. This preexisting database can be empty, or it can already contain SSURGO data.
+                <br><br>
+                After you select the existing database by clicking on it in the table, you will be returned to the main page. 
+            </p>
+            <a href="#closeHelpMenu" class="lastHelpMenuItem">Return to top</a>
+        </div>
+        <!-- Select or Create Database Page - Help Pane Content -->
+        <div id="selectLocationOfSsurgoDataFolderHelpPaneContent" class="helpPageContainer">
+            <div>
+                <div class="onlyHeader"><a href="#locationOfSSURGODataOverview">Page Overview</a></div>
+                <div class="containsSubHeaders">
+                    <button data-bs-toggle="collapse" data-bs-target="#setFilePathOfSSURGOSubHeaders" class="btn"><img src="/static/images/caret-up-fill.svg" alt="expand section"></button>
+                    <a href="#setFilePathSSURGODataHelpSection">Set File Path of SSURGO Data</a>
+                    <div id="setFilePathOfSSURGOSubHeaders" class="collapse">
+                        <div class="onlyHeader"><a href="#setFilePathSSURGODataManualSection">Manually edit file path</a></div>
+                        <div class="onlyHeader"><a href="#setFilePathSSURGODataBrowseSection">Browse through folders in the table below this section to move forward</a></div>
+                        <div class="onlyHeader"><a href="#setFilePathSSURGODataChangePathSection">Click on folder in path to move backwards</a></div>
+                    </div>
+                </div>
+                <div class="containsSubHeaders">
+                    <button data-bs-toggle="collapse" data-bs-target="#setFilePathSSURGODataSubHeaders" class="btn"><img src="/static/images/caret-up-fill.svg" alt="expand section"></button>
+                    <a href="#setFilePathSSURGODataSection">Finalize Location of SSURGO Data</a>
+                    <div id="setFilePathSSURGODataSubHeaders" class="collapse">
+                        <div class="onlyHeader"><a href="#setFilePathSSURGODataExampleSection">Example of Selecting Location of SSURGO Data</a></div>
+                        <div class="containsSubHeaders">
+                            <button data-bs-toggle="collapse" data-bs-target="#typesOfSSURGODataSubHeaders" class="btn"><img src="/static/images/caret-up-fill.svg" alt="expand section"></button>
+                            <a href="#typesOfSSURGODataSection">Types of SSURGO Data</a>
+                            <div id="typesOfSSURGODataSubHeaders" class="collapse">
+                                <div class="onlyHeader"><a href="#standardSSURGOPackageSection">Standard SSURGO data package</a></div>
+                                <div class="onlyHeader"><a href="#aoiSSURGOPackageSection">Area of Interest (AOI) SSURGO data package</a></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <h2 id="locationOfSSURGODataOverview">Page Overview</h2>
+            <p>
+                SSURGO Portal requires the location of the unzipped SSURGO data packages before data can be imported into the SQLite SSURGO Template database. 
+                This page allows you to identify the location of the folder that contains the unzipped SSURGO data.
+                <br><br>
+                You must complete the following two steps on this page.
+                <ol>
+                    <li>Set the file path of the folder where the SSURGO data is located.</li>
+                    <li>Click the “Click here to finalize file path of SSURGO Data” button.</li>
+                </ol> 
+                You will be returned to the main page after you complete step 2. 
+                <br><br>
+                Typically, you acquire SSURGO data (i.e., SSURGO data packages) by downloading them as zip files from Web Soil Survey. The downloads must 
+                be unzipped to your local SSURGO folder before you can begin importing SSURGO data.
+                <br><br>
+                This folder you are selecting can be named anything, created anywhere, and may contain many SSURGO data packages (i.e., many downloads from 
+                Web Soil Survey). It is strongly recommended that you only have SSURGO data in this folder. 
+            </p>
+            <h2 id="setFilePathSSURGODataHelpSection">Set File Path of SSURGO Data</h2>
+            <p>
+                This section allows you to identify the path to the local folder containing your SSURGO data. The contents of the folder will be displayed in the table 
+                below this section. Only folders are displayed in the table. All other items are ignored and not displayed.
+                <br><br>
+                Upon initial use, SSURGO Portal defaults the path to the C: drive. Upon subsequent use, SSURGO Portal will default the path to the location identified the 
+                last time the application was used. This path will default back to the C: drive when your browser cookies are cleared.
+                <br><br>
+                You can change the path one of three ways:
+            </p>
+                <h3 id="setFilePathSSURGODataManualSection">1. Manually edit file path</h3>
+                <p>
+                    To manually edit the path, click on the pencil icon located on the far right of the file path. After clicking the pencil icon, you either type or paste in a 
+                    new path. When you are done editing the file path, click the black X on the far right to complete the change.
+                    <br><br>
+                    This is also where you can change the drive letter. Upon initial use, the application defaults to your C: drive, but you can manually change it any other 
+                    drive letter (e.g., D:\, E:\). 
+                </p>
+                <h3 id="setFilePathSSURGODataBrowseSection">2. Browse through folders in the table below this section to move forwards</h3>
+                <p>
+                    You can change the path by clicking on folders in the table below this section.
+                </p>
+                <h3 id="setFilePathSSURGODataChangePathSection">3. Click on folder names or drive letter within the path to move backwards</h3>
+                <p>
+                    You can click on any of the folder names or the drive letter within the file path to move back through folders. For example, you see the file path 
+                    <em>C: >SSURGO Poral > SSURGO > WV</em>. This path will show you the contents of the WV folder in the table below, but you can click directly on the 
+                    word <em>SSURGO</em> in the path name to change location to <em>C: > SSURGO Portal > SSURGO.</em>
+                </p>
+            <h2 id="setFilePathSSURGODataSection">Finalize Location of SSURGO Data</h2>
+            <p>
+                After setting the file path to the folder containing the SSURGO data, click the “Click here to finalize file path of SSURGO Data” button located at the bottom of the screen. 
+                You will be returned to the main landing page after you click this button. 
+            </p>
+                <h3 id="setFilePathSSURGODataExampleSection">Example of Creating Folder, Unzipping SSURGO, and Selecting Location of SSURGO Data</h3>
+                <p>
+                    <ol>
+                        <li>You create a local folder called “SSURGO Downloads” on your C: drive.</li>
+                        <li>You download a SSURGO data package from Web Soil Survey for OR021 Gilliam County, Oregon, and place the zip file in “C:\SSURGO Downloads.”</li>
+                        <li>You unzip the SSURGO data package to the “C:\SSURGO Downloads” folder.
+                                <ul>
+                                    <li>You will see a new “OR021” folder in “C:\SSURGO Downloads” after unzipping.</li>
+                                    <li>If you open the “OR021” folder, you will see a “spatial” and “tabular” folder, which contain the spatial and
+                                        tabular SSURGO data.</li>
+                                    <li>The data is now ready for import into the template database.</li>
+                                </ul>
+                        </li>
+                        
+                        
+                        
+                        <li>In SSURGO Portal, on the “Select Folder of SSURGO Data” page, you set your file path to C: > SSURGO Downloads.
+                            <ul>
+                                <li>OR021 will appear in the table below.*<br><img id="SSURGOLocationExample"
+                                        src="static/images/SSURGOLocationExample.svg" alt="Example of the file path"></li>
+                            </ul>
+                        </li>
+                        <li>In SSURGO Portal, on the “Select Folder of SSURGO Data” page, click the “Click here to finalize file path of SSURGO data” button below the table.
+                            <ul>
+                                <li>This will return you to the main landing page.</li>
+                            </ul>
+                        </li>
+                    </ol>
+                    <sup>*</sup> If you see folders named “spatial” and “tabular” in your table, you probably drilled too far down into the file path, and you need to go up one folder. 
+                    If you select an incorrect folder, you see the correct SSURGO data or any SSURGO data available for import when you return to the main page. 
+                </p>
+                <h3 id="typesOfSSURGODataSection">Types of SSURGO Data</h3>
+                <p>
+                    Two types of SSURGO data packages are available for download on Web Soil Survey, and SSURGO Portal will support both.
+                    <h4 id="standardSSURGOPackageSection">1. Standard SSURGO data package</h4>
+                    <ul>
+                        <li>Delivered for a single soil survey area.</li>
+                        <li>Soil survey areas are typically delivered for each county in the United States, but some soil survey areas span multiple counties because they are designed for 
+                            special areas, such as tribal owned lands, National Parks, or National Forests.</li>
+                    </ul>
+                    <h4 id="aoiSSURGOPackageSection">2. Area of Interest (AOI) SSURGO data package</h4>
+                    <ul>
+                        <li>Web Soil Survey allows users to create custom AOIs and then download SSURGO for that AOI.</li>
+                        <li>AOI SSURGO is only available for download after an AOI is created on Web Soil Survey.</li>
+                        <li>AOI can include portions of more than one soil survey area.</li>
+                    </ul>
+                    Note for USDA employees, SSURGO Portal also supports internal USDA SSURGO exported from the NASIS database and SSURGO data downloaded from the Staging Server. 
+                    However, this requires you to reformat spatial data and create some additional folders before importing this SSURGO data. 
+                </p>
+                <a href="#closeHelpMenu" class="lastHelpMenuItem">Return to top</a>
+        </div>
+        <!-- Contact Us - Help Pane Content -->
+        <div id="contactUsHelpPaneContent" class="helpPageContainer">
+            <h4>Request Assistance</h4>
+            <p>If you need assistance, you may email the USDA-NRCS Soils Hotline at: </br>
+                <strong>SoilsHotline@usda.gov</strong></br></br>
+                
+                OR call us at:</br>
+                <strong>402-437-5378 OR 402-437-5379</strong></br></br>
+
+                In order to provide you support, we'll need the following information. Please copy
+                and paste the information below into your email along with a detailed 
+                description of the issue(s) you're facing. </br></br>
+
+                <strong>Application Version: <span id="applicationVersion"></span></br>
+                   SQLite SSURGO Template Version: <span id="sqliteSSURGOTemplateVersion"></span></br>
+                   SSURGO Version: <span id="ssurgoVersion"></span></br>
+                </strong></br>
+                
+                We may also need your local log file to investigate further. If we request your log file,
+                it can be found at: </br>
+                <strong><span id="logFileLocation"></span></strong>
+            </p>
+        </div>
+    </div>
+    <!-- End Help Menu's ------------------>    
+    <!--------- Home Page Menu Selections -------------->            
+    <!-----------Select SSURGO Data Download Folder Page from Home Page---------------->
+    <span id='changeTreeViewPathNavigationDescription' style="display: none;">This button allows for toggling the path navigation method from a selectable path to a typeable path. 
+        By default the option is always set as selectable.</span><!--Aria description for toggling the path navigation method on all isntances-->
+    <span id="navigateBackToHomeAriaLabel" style="display: none;">Navigate back to the home screen</span><!--Aria label for closing a screen and navigating back to the home page-->
+    <div class="subpage-display" id="selectDownloadPage" role="main" style="display: none">
+        <div class="subpage-display--header">
+            <button class="usa-button usa-button--unstyled" id="selectDownloadPageBackBtn" aria-label="Navigate back to main download from web page">
+                <img src="/static/images/arrow-left-circle.svg" class="margin-2" alt="Navigate back to the home screen"/>
+            </button>                    
+            <button type="button" id="toggleSsurgoHelpPane" class="usa-button helpPaneBtn" onclick="toggleHelpPaneContent('selectLocationOfSsurgoDataFolderHelpPaneContent')">
+                Help
+            </button>
+            <h1 class="modal-title" id="selectDownloadPageLabel">Select Download Folder of SSURGO Data</h1>
+        </div>
+        <div id='downloadFolderTree' class="subpage-display--body folderTreeTableContainer" role="tabpanel" aria-labelledby="selectDownloadPageLabel" populated='False'>
+            <div class='labels'>
+                <h2>Current Folder</h2>
+                <button id='downloadDisplayTreePath' class="usa-button usa-button--unstyled switchInputs" aria-label="Switch to typeable path input" aria-describedby="changeTreeViewPathNavigationDescription">
+                    <img src="/static/images/changePathToEdit.svg" alt="Switch to typeable path input" class="filter-blue"/>
+                </button>
+            </div>
+            <div style="display: flex; flex-direction: column; ">
+                <div id='downloadFilePathContainer' class="treeLabels filePathContainer searchBar">
+                    <div class="clickablePathContainer">
+                        <div id='downloadClickablePathContainer' class=""></div>
+                        <input id='downloadTextBox' aria-label="Select download folder path for SSURGO data" class="usa-input databaseTextBox" style="display: none;"
+                        onfocus="this.oldvalue = this.value;" onchange='executeFolderTreeRequest("downloadTreeViewTable", updatedValue("downloadTextBox"), false)'>
+                    </div>
+                    <div id="downloadSearchContainer" class="searchBar searchIcon">
+                        <input id="downloadSearchTextbox" class="usa-input databaseTextBox" placeholder="Search folder" aria-label="Search bar"></input>
+                    </div>
+                </div>
+            </div>
+            <!--Populated by ssurgo_portal_scripts.js-->
+            <div id="downloadTreeViewTableContainer" class="usa-table-container--scrollable">
+            </div>
+            <div class="tableFooter footerFolderNavigation">
+                <p>
+                    <img src="/static/images/infoIcon.svg" alt="Info Icon">
+                    <em>It is highly advisable to download soil survey data to a folder that contains no other folders or file types.</em>
+                </p>
+            </div>
+        </div>
+        <div class="subpage-display--footer">
+            <ul class="usa-button-group">
+                <li class="usa-button-group__item">
+                    <button class="usa-button usa-button--outline" onclick="$('#selectDownloadPage, #downloadPageContainer').toggle()">Go back</button>
+                </li>
+                <li class="usa-button-group__item">
+                    <button id="downloadBtn" class="usa-button toggleDisableOnLoad" disabled="true">Start download</button>
+                </li>
+            </ul>
+        </div>
+    </div>    
+    <!--End Select SSURGO Data Download Folder Modal from Home Page-->
+    <!--------- Select or Create Database Page--------->
+    <div class="subpage-display" id="selectDatabasePage" role="dialog" style="display: none">
+        <div class="subpage-display--header">
+            <button class="usa-button usa-button--unstyled" id="selectDatabasePageBackBtn" aria-labelledby="navigateBackToHomeAriaLabel">
+                <img src="/static/images/arrow-left-circle.svg" class="margin-2" alt="Navigate back to the home screen"/>
+            </button>                    
+            <button type="button" id="toggleDatabaseHelpPane"class="usa-button helpPaneBtn" onclick="toggleHelpPaneContent('selectOrCreateDatabaseHelpPaneContent')">
+                Help
+            </button>
+            <h1 class="modal-title" id="selectDatabasePageLabel">Select or Create a Database
+            </h1>
+        </div>
+        <div class="subpage-display--body folderTreeTableContainer">
+            <div id="databaseFolderTree" role="tabpanel" aria-labelledby="selectDatabasePageLabel" class="folderTreeTable">
+                <div id='getUserDatabase' populated='False'>
+                    <div class='labels'>
+                        <h2>Set File Path of Database</h2>
+                        <button id='displayTreePath' class="switchInputs usa-button usa-button--unstyled" aria-label="Switch to typeable path input" aria-describedby="changeTreeViewPathNavigationDescription">
+                        <img src="/static/images/changePathToEdit.svg" alt="Switch to typeable path input" class="filter-blue"/>
+                    </button>
+                    </div>
+                    <div id='filePathContainer' class="treeLabels filePathContainer searchBar">
+                        <div class="clickablePathContainer">
+                            <nav id="clickablePathContainer" class="usa-breadcrumb usa-breadcrumb--wrap" aria-label="Breadcrumbs,,,">
+                                <ol id="clickablePathOL" class="usa-breadcrumb__list"></ol>
+                            </nav>
+                            <input id='databaseTextBox' class="usa-input databaseTextBox" style="display: none;" onfocus="this.oldvalue = this.value;" onchange='executeFolderTreeRequest("databaseTreeViewTable", updatedValue("databaseTextBox"), true)' aria-label="Set File Path to Access an Existing Database:"></input>
+                        </div>
+                        <div id="databaseSearch" class="searchBar searchIcon">
+                            <input id="databaseSearchText" class="usa-input" aria-label="Search bar" placeholder="Search folder"></input>
+                        </div>
+                    </div><!--populated by javascript-->
+                    <div id="databaseTreeViewTableContainer" class="usa-table-container--scrollable"></div>
+                    <!--<span><em>Note:<ul>
+                        <li>Only "Folders", "Geopackage" database files, and "SQLite" database files are shown on this screen.</li>
+                        <li>The SpatiaLite databases use the SQLite file extension.</li>
+                        <li>If you are going to modify an existing SSURGO Template database that already contains SSURGO data, it is recommended to create a 
+                            backup before proceeding. This is particularly important for larger databases. </li>
+                    </ul></em></span>-->
+                </div>
+            </div>
+        </div>
+        <div id="databaseFolderTreeFooter" class="subpage-display--footer databaseFolderTreeBottomContainer footerFolderNavigation">
+            <ul class="usa-button-group">
+                <li class="usa-button-group__item">
+                    <button class="usa-button usa-button--outline" type="button" onclick="$('#selectDatabasePage, #landingPageContainer').toggle()">Go back</button>
+                </li>
+                <li class="usa-button-group__item">                            
+                    <button class="usa-button createDatabaseDisplay" id="newDBBtn" onClick="populateDatabaseTypeDropdown()">
+                        Set location
+                    </button>
+                </li>
+            </ul>
+            <div id="textTemplatesContainer">
+                <a
+                    href="#textTemplatesOptions"
+                    id="textTemplatesOptionsBtn" 
+                    class="usa-button usa-button--unstyled toggleDisableOnLoad createDatabaseDisplay"
+                    data-open-modal
+                    aria-controls="textTemplatesOptions"
+                    style="width: auto;"
+                >
+                    Internal NRCS Employee Options
+                </a>
+                <div id="textTemplatesOptions"
+                class="usa-modal"
+                aria-labelledby="internalOptionsHeading"
+                aria-describedby="textTemplatesWarning"
+                data-force-action>
+                    <div class="usa-modal__content">
+                        <div class="usa-modal__main">
+                            <h2 class="usa-modal__heading" id="internalOptionsHeading">
+                                Internal NRCS Employee Options
+                            </h2>
+                            <div class="usa-prose">
+                                <div class="usa-checkbox">
+                                    <input
+                                        class="usa-checkbox__input"
+                                        id="textTemplatesCheckbox"
+                                        type="checkbox"
+                                        name="enable-different-database-options"
+                                        value="Click-to-enable-database-options"
+                                    />
+                                    <label class="usa-checkbox__label" for="textTemplatesCheckbox">
+                                        Click to enable database options for SSURGO from NASIS or Staging Server before creating a new database
+                                    </label>
+                                </div>
+                                <p id="textTemplatesWarning">
+                                    <em>NOTE: This option is rarely selected and is only designed for Internal 
+                                    NASIS or Staging Server users. It creates special databases that
+                                    define most table keys as TEXT instead of INTEGER. Users of SSURGO data 
+                                    downloaded from Web Soil Survey do not need these TEXT key templates.</em>
+                                </p>
+                            </div>
+                            <div class="usa-modal__footer">
+                                <button class="usa-button" data-close-modal>Confirm</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <a id="toggleCreateNewDBModal" hidden aria-hidden="true" aria-controls="createNewDatabaseModal" data-open-modal></a>
+        </div>
+    </div>
+    <!--End Select Data Base Modal from Home Page-->
+    <!-----------Container for Create New Database Modal--------------->
+    <div
+        class="usa-modal"
+        id="createNewDatabaseModal"
+        aria-labelledby="createNewDatabaseModalTitle"
+        aria-describedby="createNewDatabaseModalTitle"
+        tabindex="-1"
+        data-force-action
+        aria-hidden="true"
+    >
+        <div class="usa-modal__content">
+            <div class="usa-modal__main">
+                <h2 class="usa-modal__heading" id="createNewDatabaseModalTitle">
+                    Create New Database
+                </h2>
+                <div class="usa-prose">
+                    <div class="createNewDatabaseNameContainer">
+                        <label for="createNewDatabaseName" class="usa-label createNewDatabaseLabels">New Database Name</label>
+                        <input type="text" id="createNewDatabaseName" class="usa-input" aria-label="database name textbox" placeholder="Enter new database name here..." onchange="displayNewDatabasePath()" value="NewSSURGODatabase" maxlength="100"></input>
+                    </div>
+                    <div class="createNewDatabaseTypeContainer">
+                        <label for="templateTypeDropdown" class="usa-label createNewDatabaseLabels">Choose Database Type</label>
+                        <select name="Database Template Type" id="templateTypeDropdown" class="usa-select" aria-label="Database Type dropdown" onchange="displayNewDatabasePath()"></select>
+                    </div>
+                    <div>
+                        <label for="createNewDatabaseLocation" class="createNewDatabaseLabels">New Database will be created in:</label>
+                        <!-- JS Code populates 'createNewDatabaseLocation' with full path displayed - Example: C:\Folder1\Folder2\Name_of_new_Database.gpkg-->
+                        <p id="createNewDatabaseLocation"></p> 
+                        <div id="preventDbCreationContainer" style="display: none">
+                            <p id="preventDbCreationMessage"><em>Note: Either this database already exists, a database name was not provided or you are trying to save into a folder that already contains a database. 
+                                Please ensure your directory is empty, OR change your directory, database name or database type.</em></p>
+                        </div>
+                        <p id="createNewDatabaseErrorMessage" class="warningMessage"></p>
+                    </div>
+                </div>
+                <div class="usa-modal__footer">
+                    <ul class="usa-button-group">
+                        <li class="usa-button-group__item">
+                            <button type="button" class="usa-button usa-button--outline" id="createDatabaseModalCancelBtn" data-close-modal>Cancel</a>
+                        </li>
+                        <li class="usa-button-group__item">
+                            <button type="button" class="usa-button" id="createNewDbBtn" data-close-modal onclick='createNewTemplateDatabase("templateTypeDropdown", "databaseTextBox", "createNewDatabaseName")'>Save Database</button>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+            <button
+                type="button"
+                class="usa-button usa-modal__close"
+                aria-label="Close this window"
+                id="closeNewDatabaseModal"
+                data-close-modal
+            >
+                <img src="static/images/closeIcon.svg" alt="close modal">
+            </button>
+        </div>
+    </div>
+    <!-- End Container for Create New Database Modal-->
+    <!-----------Select SSA SSURGO Data Folder Page from Home Page---------------->
+    <div class="container" id="selectSSAPage" role="main" style="display: none">
+        <div class="modal-header">
+            <button class="usa-button usa-button--unstyled" id="selectSSAPageBackBtn" aria-labelledby="navigateBackToHomeAriaLabel">
+                <img src="/static/images/arrow-left-circle.svg" class="margin-2" alt="Navigate back to the home screen"/>
+            </button>                    
+            <button type="button" id="toggleSsurgoHelpPane" class="usa-button helpPaneBtn" onclick="toggleHelpPaneContent('selectLocationOfSsurgoDataFolderHelpPaneContent')">
+                Help
+            </button>
+            <h1 class="modal-title" id="selectSSAPageLabel">Select Folder of SSURGO Data</h1>
+            <button id="selectSsurgoFolderFinalizeBtn" class="usa-button">Select Current Folder</button>                 
+        </div>
+        <div id='ssaFolderTree' role="tabpanel" aria-labelledby="selectSSAPageLabel" populated='False' class="folderTreeTableContainer">
+            <div class='labels'>
+                <h2>Current Folder</h2>
+                <button id='ssaDisplayTreePath' class="usa-button usa-button--unstyled switchInputs" aria-label="Switch to typeable path input" aria-describedby="changeTreeViewPathNavigationDescription">
+                    <img src="/static/images/changePathToEdit.svg" alt="Switch to typeable path input" class="filter-blue"/>
+                </button>
+            </div>
+            <div style="display: flex; flex-direction: column; ">
+                <div id='ssaFilePathContainer' class="filePathContainer searchBar">
+                    <div class="clickablePathContainer">
+                        <nav id="ssaClickablePathContainer" class="usa-breadcrumb usa-breadcrumb--wrap" aria-label="Breadcrumbs,,,">
+                            <ol id="ssaClickablePathOL" class="usa-breadcrumb__list"></ol>
+                        </nav>
+                        <input id='ssaTextBox' aria-label="Select folder path for SSURGO downloads folder" class="usa-input databaseTextBox" style="display: none;" onfocus="this.oldvalue = this.value;" onchange='executeFolderTreeRequest("importTreeViewTable", updatedValue("ssaTextBox"), false)'>
+                    </div>
+                    <div id="ssaSearchContainer" class="searchBar searchIcon">
+                        <input id="ssaSearchTextbox" class="usa-input" placeholder="Search folder" aria-label="Search bar"></input>
+                    </div>
+                </div>
+                <div id="hasSsurgoDataMessage" class="usa-alert usa-alert--success usa-alert--slim margin-0" role="alert" aria-role="The current folder includes importable SSURGO data">
+                    <div class="usa-alert__body">
+                      <p class="usa-alert__text">
+                        The current folder includes importable SSURGO data
+                      </p>
+                    </div>
+                </div>
+            </div>
+            <!--Populated by ssurgo_portal_scripts.js-->
+            <span id="rowHasSSURGODataDesc" style="display: none;">This folder has SSURGO Data</span>
+            <div id="importTreeViewTableContainer" class="usa-table-container--scrollable"> 
+            </div>
+            <div class="tableFooter footerFolderNavigation">
+                <span>
+                    <label for="limitFolderNavigation" class="usa-label">Folder Navigation</label>
+                    <select id="limitFolderNavigation" class="usa-select">
+                        <option id="enableFolderLimit" value="true">Limit to recommended depth</option>
+                        <option id="disableFolderLimit" value="false">Enable all folders</option>
+                    </select>
+                    <p id="folderNavDescription"></p>
+                </span>
+                <p>
+                    <img src="/static/images/infoIcon.svg" alt="Info Icon">
+                    <em>SSURGO downloads are delivered in zip files. You must unzip them to make them available for import. Additionally, only folders are presented on this screen.</em>
+                </p>
+            </div>
+        </div>
+    </div>    
+    <!--End Select SSA SSURGO Data Folder Modal from Home Page-->
+
+    <!--SDV Rating results page-->
+    <div id="sdvRatingResultsPage" class="container-fluid" role="main" style="display: none;">
+        <div class="modal-header">
+            <!--Header-->
+            <button class="usa-button usa-button--unstyled" onclick="$('#sdvRatingResultsPage, #homePageContainer').toggle()" aria-labelledby="navigateBackToHomeAriaLabel">
+                <img src="/static/images/arrow-left-circle.svg" class="margin-2" alt="Navigate back to the home screen">
+            </button>
+            <p id="sdvRatingResultsName" style="margin-right: auto; margin-left: auto;">Rating Name</p>
+        </div>
+        <div role="tabpanel" style="margin-bottom: 2%; margin-top: 2%;">
+            <!--Body-->
+            <div style="
+            width: 80%;
+            height: 500px;
+            display: flex;
+            justify-content: center;
+            margin-left: auto;
+            margin-right: auto;
+            border: solid;
+            align-items: center;
+            ">
+                <!--Map-->
+                <map-component></map-component>
+            </div>
+            <div id="ratingTableContainer" class="usa-table-container--scrollable" style="margin-top: 2%;"></div>
+        </div>
+        <div class="modal-footer" style="justify-content: flex-start;">
+            <!--Footer-->
+            <button class="usa-button">Create layer file</button>
+            <button class="usa-button usa-button--outline">Create Advanced Outputs</button>
+        </div>
+    </div> 
+    <!--End SDV Rating results page-->
+    <!--Warning/Error Modals-->
+    <span>
+        <a 
+            id="differentDataSourceBtn"
+            class="usa-button"
+            aria-controls="differentDataSourceModal"
+            data-open-modal 
+            hidden
+        >
+            Open Different Data Source Modal
+        </a>
+        <div
+            class="usa-modal"
+            id="differentDataSourceModal"
+            aria-labelledby="differentDataSourceModalTitle"
+            aria-describedby="differentDataSourceModalMessage"
+            tabindex="-1" 
+            data-force-action
+            aria-hidden="true"
+        >
+            <div class="usa-modal__content">
+                <div class="usa-modal__main">
+                    <h2 class="usa-modal__heading" id="differentDataSourceModalTitle">
+                        <!-- Are you sure you want to continue? -->
+                        <img src="static/images/warningIcon.svg" alt="warning icon">
+                        Different Data Source Warning
+                    </h2>
+                    <div class="usa-prose">
+                        <p id="differentDataSourceModalMessage"></p>
+                        <p>
+                            <b>Note:</b> SSURGO is produced from onsite field investigations, while STATSGO2 is an estimated general soil map. For 
+                            more information on these databases, see <a href="https://www.nrcs.usda.gov/resources/data-and-reports/soil-survey-geographic-database-ssurgo" target="_blank" rel="noopener noreferrer">Description of SSURGO Database</a> 
+                            and <a href="https://www.nrcs.usda.gov/resources/data-and-reports/description-of-statsgo2-database" target="_blank" rel="noopener noreferrer">Description of STATSGO2 Database</a> . <br><br> 
+                            Do you wish to proceed?
+                        </p>
+                    </div>
+                    <div class="usa-modal__footer">
+                        <ul class="usa-button-group">
+                            <li class="usa-button-group__item">
+                              <a href="#" class="usa-button usa-button--outline" id="cancelDiffDataImport" data-close-modal onclick="document.getElementById('importBtn').focus();">Cancel</a>
+                            </li>
+                            <li class="usa-button-group__item">
+                              <button type="button" class="usa-button" id="continueDiffDataImport">Continue</button>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+                <button
+                    type="button"
+                    class="usa-button usa-modal__close"
+                    aria-label="Close this window"
+                    id="closeDifferentDataSourceModalBtn"
+                    onclick="document.getElementById('importBtn').focus();" 
+                    data-close-modal
+                >
+                    <img src="static/images/closeIcon.svg" alt="close modal">
+                </button>
+            </div>
+        </div>
+    </span>
+
+    <span>
+        <a 
+            id="existingSSABtn"
+            class="usa-button"
+            aria-controls="existingSSAModal"
+            data-open-modal 
+            hidden
+        >
+            Open Existing SSA Modal
+        </a>
+        <div
+            class="usa-modal"
+            id="existingSSAModal"
+            aria-labelledby="existingSSAModalTitle"
+            aria-describedby="existingSSAModalMessage"
+            tabindex="-1" 
+            data-force-action
+            aria-hidden="true"
+        >
+            <div class="usa-modal__content">
+                <div class="usa-modal__main">
+                    <h2 class="usa-modal__heading" id="existingSSAModalTitle">
+                        <!-- Are you sure you want to continue? -->
+                        <img src="static/images/warningIcon.svg" alt="warning icon">
+                        Existing Area Symbol Warning
+                    </h2>
+                    <div class="usa-prose">
+                        <p id="existingSSAModalMessage"></p>
+                        <p>Continuing to import will override any overlapping areasymbols. Do you wish to proceed?</p>
+                    </div>
+                    <div class="usa-modal__footer">
+                        <ul class="usa-button-group">
+                            <li class="usa-button-group__item">
+                              <a href="#" class="usa-button usa-button--outline" id="cancelExistingImport" data-close-modal onclick="document.getElementById('importBtn').focus();">Cancel</a>
+                            </li>
+                            <li class="usa-button-group__item">
+                              <button type="button" class="usa-button" id="continueExistingImport" data-close-modal>Continue</button>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+                <button
+                    type="button"
+                    class="usa-button usa-modal__close"
+                    aria-label="Close this window"
+                    id="closeExistingSSAModalBtn"
+                    onclick="document.getElementById('importBtn').focus();"
+                    data-close-modal
+                >
+                    <img src="static/images/closeIcon.svg" alt="close modal">
+                </button>
+            </div>
+        </div>
+    </span>
+
+    <span>
+        <a 
+            id="duplicateSSABtn"
+            class="usa-button"
+            aria-controls="duplicateSSAModal"
+            data-open-modal 
+            hidden
+        >
+            Open Duplicate Area Symbol Modal
+        </a>
+        <div
+            class="usa-modal"
+            id="duplicateSSAModal"
+            aria-labelledby="duplicateSSAModalTitle"
+            aria-describedby="duplicateSSAModalMessage"
+            tabindex="-1" 
+            data-force-action
+            aria-hidden="true"
+        >
+            <div class="usa-modal__content">
+                <div class="usa-modal__main">
+                    <h2 class="usa-modal__heading" id="duplicateSSAModalTitle">
+                        <img src="static/images/warningIcon.svg" alt="warning icon">
+                        Duplicate Area Symbol Error
+                    </h2>
+                    <div class="usa-prose">
+                        <p id="duplicateSSAModalMessage"></p>
+                        <p>The above datasets contain duplicate areasymbols. Please deselect all but one of the folders containing the duplicate area symbols and try again.</p>
+                    </div>
+                    <div class="usa-modal__footer">
+                        <button class="usa-button usa-button--outline" id="closeDuplicateSSAModalBtn" data-close-modal onclick="document.getElementById('importBtn').focus();">Close</button>
+                    </div>
+                </div>
+                <button
+                    type="button"
+                    class="usa-button usa-modal__close"
+                    aria-label="Close this window"
+                    id="closeDuplicateSSAModalIcon"
+                    onclick="document.getElementById('importBtn').focus();"
+                    data-close-modal
+                >
+                    <img src="static/images/closeIcon.svg" alt="close modal">
+                </button>
+            </div>
+        </div>
+    </span>
+
+    <span>
+        <a 
+            id="missingObjectModalBtn"
+            class="usa-button"
+            aria-controls="missingObjectModal"
+            data-open-modal 
+            hidden
+        >
+            Open Missing Object Modal
+        </a>
+        <div
+            class="usa-modal"
+            id="missingObjectModal"
+            aria-labelledby="missingObjectModalTitle"
+            aria-describedby="missingObjectModalMessage"
+            tabindex="-1" 
+            data-force-action
+            aria-hidden="true"
+        >
+            <div class="usa-modal__content">
+                <div class="usa-modal__main">
+                    <h2 class="usa-modal__heading" id="missingObjectModalTitle">
+                        <img src="static/images/warningIcon.svg" alt="warning icon">
+                        Unable to find file
+                    </h2>
+                    <div class="usa-prose">
+                        <p id="missingObjectModalMessage"></p>
+                        <p>SSURGO Portal was unable to find the selected file. Typically this happens because an item was deleted or moved using the computers file management system.
+                            Closing this message will update your folder contents.
+                        </p>
+                    </div>
+                    <div class="usa-modal__footer">
+                        <button id="closeMissingObjectModal" class="usa-button usa-button--outline" data-close-modal>Close</button>
+                    </div>
+                </div>
+                <button
+                    type="button"
+                    class="usa-button usa-modal__close"
+                    aria-label="Close this window"
+                    id="closeMissingObjectModalBtn"
+                    data-close-modal
+                >
+                    <img src="static/images/closeIcon.svg" alt="close modal">
+                </button>
+            </div>
+        </div>
+    </span>
+
+    <span>
+        <a 
+            id="versionCheckModalBtn"
+            class="usa-button"
+            aria-controls="versionCheckModal"
+            data-open-modal
+            hidden
+        >
+            Open Version Check Modal
+        </a>
+        <div
+            class="usa-modal"
+            id="versionCheckModal"
+            aria-labelledby="versionCheckModalTitle"
+            aria-describedby="versionCheckModalMessage"
+            tabindex="-1" 
+            data-force-action
+            aria-hidden="true"
+        >
+            <div class="usa-modal__content">
+                <div class="usa-modal__main">
+                    <h2 class="usa-modal__heading" id="versionCheckModalTitle">
+                        <img src="static/images/warningIcon.svg" alt="warning icon">
+                        SSURGO Portal Version Notification
+                    </h2>
+                    <div class="usa-prose">
+                        <p id="versionCheckModalMessage"></p>
+                        <p>Once the newest SSURGO_Portal.zip has finished downloading:
+                            <ul>
+                                <li>Close this current application and its command window (if the latter doesn't close automatically).</li>
+                                <li>Unzip the new SSURGO_Portal.zip and use that new .pyz file instead.</li>
+                                <li>You can delete the older SSURGO_Portal.pyz application file.</li>
+                                <li>Click <a href="https://www.nrcs.usda.gov/resources/data-and-reports/ssurgo-portal#version" target="_blank" rel="help">here</a> 
+                                    for changes released with this update and other documentation.</li>
+                            </ul>
+                            <p>For more information, email the USDA-NRCS Soils Hotline at <strong>SoilsHotline@usda.gov</strong><br>
+                                OR call at <strong>402-437-5378</strong> OR <strong>402-437-5379</strong></p>  
+                    </div>
+                    <div class="usa-modal__footer">
+                        <ul class="usa-button-group">
+                            <li class="usa-button-group__item">
+                              <a href="#" class="usa-button usa-button--outline" id="closeVersionModalBtn" data-close-modal>Remind me later</a>
+                            </li>
+                            <li class="usa-button-group__item">
+                                <a href="https://websoilsurvey.sc.egov.usda.gov/DSD/Download/SsurgoPortal/SSURGO_Portal.zip" target="_blank" rel="noopener noreferrer" id="downloadButton" class="usa-button" data-close-modal></a>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+                <button
+                    type="button"
+                    class="usa-button usa-modal__close"
+                    aria-label="Close this window"
+                    id="closeVersionModalBtn"
+                    data-close-modal
+                >
+                    <img src="static/images/closeIcon.svg" alt="close modal">
+                </button>
+            </div>
+        </div>
+    </span>
+
+    <span>
+        <a 
+            id="deleteWarningModalBtn"
+            class="usa-button"
+            aria-controls="deleteWarningModal"
+            data-open-modal
+            hidden
+        >
+            Open Delete Warning Modal
+        </a>
+        <div
+            class="usa-modal"
+            id="deleteWarningModal"
+            aria-labelledby="deleteWarningModalTitle"
+            aria-describedby="deleteDatabaseMessage" 
+            tabindex="-1" 
+            data-force-action
+            aria-hidden="true"
+        >
+            <div class="usa-modal__content">
+                <div class="usa-modal__main">
+                    <h2 class="usa-modal__heading" id="deleteWarningModalTitle">
+                        <img src="static/images/warningIcon.svg" alt="warning icon">
+                        SSURGO Portal Deletion Warning
+                    </h2>
+                    <div class="usa-prose">
+                        <p id="deleteDatabaseMessage"></p> <!--This is populated by js-->
+                        <p>While not required, we recommend that instead of deleting all data from your current database, you click Cancel, and create a brand new database.
+                            If you still wish to proceed, click Continue.</p>
+                    </div>
+                    <div class="usa-modal__footer">
+                        <ul class="usa-button-group">
+                            <li class="usa-button-group__item">
+                                <button type="button" class="usa-button usa-button--outline" data-close-modal id="cancelDelete" onclick="document.getElementById('deleteBtn').focus();">Cancel</button>
+                            </li>
+                            <li class="usa-button-group__item">
+                                <button type="button" id="continueDelete" class="usa-button" data-close-modal>Continue</button>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+                <button
+                    type="button"
+                    class="usa-button usa-modal__close"
+                    aria-label="Close this window"
+                    id="closeDeleteModalBtn"
+                    onclick="document.getElementById('deleteBtn').focus();"
+                    data-close-modal
+                >
+                    <img src="static/images/closeIcon.svg" alt="close modal">
+                </button>
+            </div>
+        </div>
+    </span>
+
+
+    <!--End Warning/Error Modals-->
+    <!--Loading Page modal from Home Page-->
+                    <!--progress-display is LitElement that encapsulates ProgressDisplay-->
+                    <progress-display id="progressdisplay"></progress-display>
+    <div class="modal fade" id="progressScreen" tabindex="-1" role="dialog">
+        <div class="modal-dialog" role="document" style="height:inherit;">
+            <div class="modal-content" style="height: fit-content; min-height: 100vh;">
+                <div class="modal-body" id='progressScreenModal' populated='False'>
+                    <div id="progressScreenContainer" class="progressScreen">
+                        <!--Toggled by ssurgo_portal_scripts.js-->
+                        <span id="progressTitle"></span> <!-- Consider wrapping this inside a <h#> tag. Currently doesn't stand out -->
+                        <img src="/static/images/SSAsInDatabaseIcon.svg" id="progressImgImport" alt="progressImageImport" hidden>
+                        <img src="/static/images/DeleteSSAsFromDatabaseIcon.svg" id="progressImgDelete" alt="progressImageDelete" hidden> <!--Populated by ssurgo_portal_scripts.js-->
+                        <p id="progressText"></p> <!--Populated by ssurgo_portal_scripts.js-->
+                        <!--Values are changed by ssurgo_portal_scripts.js-->                        
+                        <div class="timer">
+                            <p>Elapsed Time:</p>
+                            <div id="timerCount"></div>
+                        </div>
+                        <div class='progress progressBarSuccessContainer'>
+                            <div id="progressBarSuccess" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 2%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                            <div id="progressBarFail" class="progress-bar progress-bar-striped progress-bar-animated bg-danger" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                        </div>
+                        <p id="progressCounterMessage"></p><!--Populated by ssurgo_portal_scripts.js-->
+                        <div class="usa-accordion">
+                            <button
+                                type="button"
+                                id="toggleProgressErrorDiv" 
+                                class="usa-accordion__button"
+                                aria-expanded="false"
+                                aria-controls="progressErrorDiv" 
+                                style="display: none"
+                            >
+                                <!--Button text is populated by ssurgo_portal_scripts.js-->
+                            </button>
+                            <div id="progressErrorDiv" class="margin-left-1"></div>
+                        </div>
+                        <div class="usa-accordion">
+                            <button
+                                type="button"
+                                id="progressListButton" 
+                                class="usa-accordion__button"
+                                aria-expanded="false"
+                                aria-controls="progressList" 
+                                style="display: none"
+                            >
+                                <div class="usa-alert usa-alert--success usa-alert--slim">
+                                    <div class="usa-alert__body">
+                                      <p id="progressListButtonText" class="usa-alert__text"></p> <!--Populated by ssurgo_portal_scripts.js-->
+                                    </div>
+                                </div>
+                                <!--Populated by ssurgo_portal_scripts.js-->
+                            </button>                        
+                            <div id="progressList" class="margin-left-1"></div>
+                        </div>
+                        <button class="usa-button usa-button--outline" id="stopProgress" onclick="stoppingProgress()">Stop</button>
+                        <button class="usa-button usa-button--outline" id="closeProgressModal" data-bs-dismiss="modal" aria-label="Close" style="display: none;">Next</button>
+                    </div>
+                    <!--<div id="loadedMessageContainer" style="display: none;">
+                        <p id="loadedMessage">#### Loaded into database {DBName} from {SSA Parent Folder}</p>
+                        <button class="btn" data-bs-dismiss="modal" aria-label="Close">Acknowledge</button>
+                    </div>-->
+                </div>
+            </div>
+        </div>
+    </div>
+    <!--End Loading Page modal from Home Page-->
+    <!--End Home Page Menu Selections-->
+    <!--Start Footer-->
+    <!-- <div class="col-12" class="footer" role="footer">
+        Placeholder footer. Will add-in at a later time if desired by business.
+    </div> -->
+    <!--End Footer-->    
+    <div class="modal fade" id="serverClosedModal" tabindex="-1" role="dialog" aria-labelledby="serverClosedTitle" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered" role="document">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h1 class="modal-title" id="serverClosedTitle"><img src="/static/images/warningIcon.svg" style="margin-right: 5px;" alt="error image icon"/>Server Closed Error</h1>
+            </div>
+            <div class="modal-body">
+                ERROR: The SSURGO Portal application has stopped working and any active data importing or data deleting has ceased. 
+                This problem typically occurs due to the webpage being refreshed or the command line interface being closed manually. 
+                To resolve this issue, please close this webpage and relaunch SSURGO Portal. 
+                In the future, do not close the command line window or hit the webpage refresh button when actively running SSURGO Portal.
+            </div>
+          </div>
+        </div>
+    </div>
+    <div id="sdvLoadingScreen" class="container" style="display: None;" aria-label="Rating loading screen" role="dialog" aria-live="polite">
+        <h1 id="sdvRatingHeading" tabindex="-1">Generating rating...</h1>
+        <p id="sdvLoadingMessage"></p>
+        <div class="usa-prose">
+            <div id="sdvLoadingBar" class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%; height:1.25rem;" role="progressbar" aria-hidden="true"> <!--role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"-->
+                <label for="sdvLoadingBar">Loading...</span>
+            </div>
+            <div class="timer">
+                <p>Elapsed Time:</p>
+                <div id="sdvTimerCount"></div>
+            </div>
+        </div>
+            <button id="sdvLoadingButton" class="usa-button" onclick="sdvLoadingScreen.closeLoadingScreen()">Cancel</button>
+        </div>
+    </div>
+    <script type="text/javascript" src="/static/SubComponents/JsComponents/includeHtml.js" loading="eager"></script>
+    <script>
+        window.onload = function(){includeHtml()}
+    </script>
+    <script src="/static/jquery-3.6.0.min.js"></script>
+    <script src="/static/popper.min.js"></script>
+    <script src="/static/bootstrap.min.js"></script>
+    <!--Downloader scripts-->
+    <script type="text/javascript" src="/leaflet/javascript/leaflet.js"></script>
+    <script type="text/javascript" src="/leaflet/javascript/esri-leaflet.js"></script>
+    <script type="text/javascript" src="/leaflet/javascript/leaflet.draw.js"></script>
+    <script type="text/javascript" src="/leaflet/javascript/wkt.js"></script>
+    <script type="text/javascript" src="/leaflet/javascript/shapefile.min.js"></script>
+    <script type="text/javascript" src="/leaflet/javascript/turf.min.js"></script>
+    <!--END Downloader scripts-->
+    <script type='text/javascript' src="/static/ssurgo_portal_scripts.js"></script>
+    <script type="text/javascript" src="/uswds/javascript/uswds.min.js"></script>
+    <script type="module" src="/static/SubComponents/JsComponents/SSASelector.mjs"></script>   
+    <script type="module" src="/static/SubComponents/JsComponents/ProgressDisplay.mjs"></script>  
+    <script type="module" src="/static/SubComponents/JsComponents/MapComponent.js"></script>     
+</body>
+</html>
