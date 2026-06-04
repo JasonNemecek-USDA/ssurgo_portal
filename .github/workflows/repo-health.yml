@@ -1,0 +1,23 @@
+name: Repository Health
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 13 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Repo summary
+        run: |
+          echo "## Repository Health" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Branch: $GITHUB_REF_NAME" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Commit: $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Files tracked: $(git ls-files | wc -l)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Last commit:" >> "$GITHUB_STEP_SUMMARY"
+          git log -1 --pretty='  - %h %s (%an, %ad)' --date=short >> "$GITHUB_STEP_SUMMARY"
