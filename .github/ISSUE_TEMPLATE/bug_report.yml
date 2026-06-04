@@ -1,0 +1,36 @@
+name: Bug report
+description: Report a problem, including SSURGO download failures.
+labels: [bug]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output from `ssurgo-version`
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: source_url
+    attributes:
+      label: Download URL
+      description: The URL that failed (if applicable)
+  - type: textarea
+    id: error
+    attributes:
+      label: Error message shown to user
+      description: Paste the full message.
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Steps to reproduce the issue.
+    validations:
+      required: true
