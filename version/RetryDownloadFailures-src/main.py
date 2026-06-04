@@ -37,6 +37,8 @@
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
 import time
 import config
@@ -61,6 +63,97 @@ except:
     pass
 
 runmode = RunMode.UNDEFINED
+
+
+def _runtime_root_path():
+    """Return folder where runtime assets/environment should live."""
+    if config.isPyzFile:
+        return os.path.dirname(os.path.abspath(sys.argv[0]))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _env_python_path(env_dir: str) -> str:
+    if config.osType == "Windows":
+        return os.path.join(env_dir, "Scripts", "python.exe")
+    return os.path.join(env_dir, "bin", "python3")
+
+
+def _find_python_executable(version_string: str):
+    """Find a Python executable for a specific major.minor version."""
+    if f"{sys.version_info.major}.{sys.version_info.minor}" == version_string:
+        return sys.executable
+
+    if config.osType == "Windows":
+        try:
+            result = subprocess.run(
+                ["py", f"-{version_string}", "-c", "import sys; print(sys.executable)"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            candidate = result.stdout.strip().splitlines()
+            if candidate:
+                return candidate[-1]
+        except Exception:
+            pass
+
+    for candidate_name in [f"python{version_string}", "python3", "python"]:
+        candidate_path = shutil.which(candidate_name)
+        if candidate_path:
+            try:
+                result = subprocess.run(
+                    [candidate_path, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                if result.stdout.strip() == version_string:
+                    return candidate_path
+            except Exception:
+                continue
+    return None
+
+
+def ensure_runtime_python_environment():
+    """Ensure the app runs under a supported Python version (relaunch if needed)."""
+    supported_versions = config.get("supportedPythonVersions")
+    current_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+
+    if current_version in supported_versions:
+        return True
+
+    target_version = supported_versions[-1]
+    root_path = _runtime_root_path()
+    env_fragment = target_version.replace(".", "")
+    managed_env_dir = os.path.join(root_path, f"venv{env_fragment}")
+    managed_env_python = _env_python_path(managed_env_dir)
+
+    if os.path.isfile(managed_env_python):
+        print(
+            f"Current Python {current_version} is unsupported. "
+            f"Switching to existing runtime environment for Python {target_version}."
+        )
+        os.execv(managed_env_python, [managed_env_python] + sys.argv)
+
+    source_python = _find_python_executable(target_version)
+    if not source_python:
+        print(
+            f"Current Python {current_version} is unsupported. "
+            f"Please install Python {target_version}, then run SSURGO Portal again."
+        )
+        return False
+
+    try:
+        print(
+            f"Current Python {current_version} is unsupported. "
+            f"Building local runtime environment with Python {target_version}..."
+        )
+        subprocess.run([source_python, "-m", "venv", managed_env_dir], check=True)
+        print("Runtime environment created. Restarting in the new environment...")
+        os.execv(managed_env_python, [managed_env_python] + sys.argv)
+    except Exception as ex:
+        print(f"Failed to build local runtime environment: {ex}")
+        return False
 
 
 def getMode(argv):
@@ -181,6 +274,9 @@ def main(argv):
     try:
         response = None
 
+        if not ensure_runtime_python_environment():
+            return
+
         # What mode are we in?
         global runmode
         (runmode, errormessage) = getMode(argv)
@@ -232,11 +328,11 @@ def main(argv):
                     "the application will break and will have to be relaunched."
                 )
                 if runmode == RunMode.SSURGO_PORTAL_UI:
-                    webpage.runServer()
+                    webpage.run_server()
                 elif runmode == RunMode.SSURGO_PORTAL_DEBUG_BROWSER:
-                    webpage.runServerDebugging(argv[2])
+                    webpage.run_server_debugging(argv[2])
             except Exception as e:
-                message = "Ran into issue launching SSURGO Portal UI. Error: " + e
+                message = "Ran into issue launching SSURGO Portal UI. Error: " + str(e)
                 tlogger.critical(message)
                 input(message)
                 pass

@@ -1323,6 +1323,24 @@ schemaDictionary[requestName]["request"] = {
             "description":"Should existing data be overwritten",
             "type":"boolean",
             "default":True
+        },
+        "downloadretryattempts": {
+            "description": "Total number of download/unzip attempts per survey before reporting failure.",
+            "type": "integer",
+            "minimum": 1,
+            "default": 3
+        },
+        "downloadretrydelayseconds": {
+            "description": "Delay in seconds between retry attempts for download/unzip failures.",
+            "type": "integer",
+            "minimum": 0,
+            "default": 20
+        },
+        "downloadmaxthreads": {
+            "description": "Maximum number of concurrent survey download threads.",
+            "type": "integer",
+            "minimum": 1,
+            "default": 8
         }
     }),
     "required":["request", "downloaddir", "soilsurveyareas"],

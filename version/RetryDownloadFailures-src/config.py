@@ -56,7 +56,7 @@ static_config = {
     },
 
     "versionInformation": {
-        'ApplicationVersion': '0.0.0.0', #This will be populated by the X build Job (To be created) & will be updated when we deploy. This value won't change in our repository. During local development, the version will always be 0.0.0.0.
+        'ApplicationVersion': '1.0.0.110', # Updated from default development version to a real portal version for local testing.
         'SQLiteSSURGOTemplateVersion': '1.0.0', #Needs to be manually updated by a developer (doesn't change often). All templates will have the same version. This is the version number of the SQLiteSSURGOTemplate that's included in the Project.
         'SSURGOVersion': '2.3.3' #Needs to be manually updated by a developer (doesn't change often). This is the SSURGO database model version used to create the SSURGO template database schema. This value needs to match what we have in the 'systemtemplateinformation' table inside the template database. This version also aligns with the version.txt file inside Tabular folders. 
     },
@@ -75,7 +75,14 @@ static_config = {
     "disableMukeyWhereClause": True,
 
     #Flag to turn on printing of times it takes to run different functions of the application.
-    "enableTimeTrials": False
+    "enableTimeTrials": False,
+
+    # Retry controls for SSURGO bulk download unzip/download failures.
+    "bulkDownloadRetryAttempts": 3,
+    "bulkDownloadRetryDelaySeconds": 20,
+
+    # Cap concurrent survey downloads to improve throughput consistency.
+    "bulkDownloadMaxThreads": 8
 }
 
 dynamic_config = deepcopy(static_config)

@@ -3656,6 +3656,29 @@ window.onload = async function(){
         fetch('http://localhost:8083/tlogger/warning:No%20Internet%20Connection')
     }
     let newestVersion
+    const compareDottedVersions = (currentVersion, latestVersion) => {
+        const parseParts = (versionText) => String(versionText)
+            .trim()
+            .split('.')
+            .map(part => {
+                const parsed = Number.parseInt(part, 10)
+                return Number.isNaN(parsed) ? 0 : parsed
+            })
+
+        const currentParts = parseParts(currentVersion)
+        const latestParts = parseParts(latestVersion)
+        const maxLen = Math.max(currentParts.length, latestParts.length)
+
+        for (let i = 0; i < maxLen; i++) {
+            const currentPart = currentParts[i] ?? 0
+            const latestPart = latestParts[i] ?? 0
+            if (currentPart < latestPart) return -1
+            if (currentPart > latestPart) return 1
+        }
+
+        return 0
+    }
+
     //Proceed if the Browser has internet access and the curVersion cookie is set
     if (verTest) {
         //Attempt to get the most recent SSURGO Portal version number
@@ -3672,7 +3695,8 @@ window.onload = async function(){
         })
         //Proceed if most recent SSURGO Portal version number was retreived
         if (verTest === true) {
-            if (curVersion === newestVersion) {
+            const versionCompare = compareDottedVersions(curVersion, newestVersion)
+            if (versionCompare >= 0) {
                 fetch('http://localhost:8083/tlogger/info:SSURGO%20Portal%20is%20up%20to%20date')
                 //console.log("SSURGO Portal is up to date") //diag stmt. TODO: output to log file instead.
             } else {

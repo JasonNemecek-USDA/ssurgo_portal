@@ -21,10 +21,19 @@ import concurrent.futures as cf
 import itertools as it
 import config
 from template_logger import tlogger
+requests = None
 try:
     import requests
-except:
-    pass
+except Exception:
+    requests = None
+
+REQUEST_NETWORK_EXCEPTIONS = (socket.error, socket.timeout, URLError, HTTPError)
+if requests is not None:
+    REQUEST_NETWORK_EXCEPTIONS = REQUEST_NETWORK_EXCEPTIONS + (
+        requests.HTTPError,
+        requests.Timeout,
+        requests.RequestException,
+    )
 
 
 class BulkDownloader:
@@ -35,10 +44,30 @@ class BulkDownloader:
         self.surveyList = request["soilsurveyareas"]
         self.overwriteFlg = request["overwriteflg"] if "overwriteflg" in request else False
         self.usercutoff = request["creationcutoff"] if "creationcutoff" in request else None
+        default_attempts = config.get("bulkDownloadRetryAttempts")
+        default_delay = config.get("bulkDownloadRetryDelaySeconds")
+        default_max_threads = config.get("bulkDownloadMaxThreads")
+        try:
+            configured_attempts = int(request.get("downloadretryattempts", default_attempts))
+        except (TypeError, ValueError):
+            configured_attempts = default_attempts
+        try:
+            configured_delay = int(request.get("downloadretrydelayseconds", default_delay))
+        except (TypeError, ValueError):
+            configured_delay = default_delay
+        try:
+            configured_max_threads = int(request.get("downloadmaxthreads", default_max_threads))
+        except (TypeError, ValueError):
+            configured_max_threads = default_max_threads
+
+        self.downloadRetryAttempts = max(1, configured_attempts)
+        self.downloadRetryDelaySeconds = max(0, configured_delay)
+        self.downloadMaxThreads = max(1, configured_max_threads)
         self.formattedSSAList = []
         self.paramSet = []
         self.surveyCount = 0
         self.serverError = False
+        self.overFive = []
 
         """
         Adapted from https://github.com/alexwlchan/concurrently/blob/main/concurrently.py
@@ -67,7 +96,7 @@ class BulkDownloader:
             # getting the first element repeatedly.
             fn_inputs = iter(self.paramSet)
         
-            with cf.ThreadPoolExecutor() as executor:
+            with cf.ThreadPoolExecutor(max_workers=max(1, max_concurrency)) as executor:
                 # initialize first set of processes
                 futures = {
                     executor.submit(fn, **params): params
@@ -82,7 +111,13 @@ class BulkDownloader:
                     for fut in done:
                         # once process is done clear it out, yield results and params
                         original_input = futures.pop(fut)
-                        yield original_input, fut.result()
+                        try:
+                            result = fut.result()
+                        except Exception as ex:
+                            tlogger.error(f"Task failed for {original_input}: {ex}")
+                            yield original_input, [2, f"Unhandled task exception: {ex}"]
+                        else:
+                            yield original_input, result
                     
                     # Sends another set of processes equivalent in size to those just completed
                     # to executor to keep it at max_concurrency in the pool at a time,
@@ -172,11 +207,13 @@ class BulkDownloader:
             tlogger.error(f"Failed to download the sapoly.geojson file from {config.get('sapolyDownloadUrl')}: {e}")
             print("An error occured trying to download the sapoly.geojson file")
 
-    def _clear_partial_survey_paths(self, areaSym, zipName):
+    def _clear_partial_survey_paths(self, areaSym, zipName, root_names=None):
         """Remove partially extracted survey data when unzip/download fails."""
         try:
             candidates = [areaSym, areaSym.upper(), zipName[:-4]]
-            for candidate in candidates:
+            if root_names:
+                candidates.extend(root_names)
+            for candidate in set(candidates):
                 candidate_path = os.path.join(self.outputFolder, candidate)
                 if os.path.exists(candidate_path):
                     if os.path.isdir(candidate_path):
@@ -187,13 +224,45 @@ class BulkDownloader:
         except Exception as err:
             tlogger.warning(f"Failed to remove partial survey path: {err}")
 
+    def _expected_extraction_prefixes(self, areaSym, zipName):
+        """Return valid folder/file prefixes expected after extraction."""
+        return [
+            areaSym,
+            areaSym.upper(),
+            f"wss_SSA_{areaSym}_[",
+            f"soil_{areaSym.lower()}"
+        ]
+
+    def _find_extracted_survey_folder(self, areaSym, zipName):
+        """Locate a matching extracted survey folder in the output directory."""
+        for item_name in os.listdir(self.outputFolder):
+            for prefix in self._expected_extraction_prefixes(areaSym, zipName):
+                if item_name.lower().startswith(prefix.lower()):
+                    item_path = os.path.join(self.outputFolder, item_name)
+                    if os.path.isdir(item_path):
+                        return item_path
+        return None
+
     def _validate_extraction(self, areaSym, zipName, root_names):
-        """Validate the extracted ZIP output contains the expected survey root folder."""
+        """Validate extracted output exists on disk with expected SSURGO structure."""
         expected_candidates = {areaSym, areaSym.upper(), zipName[:-4]}
-        for extracted_name in root_names:
-            if any(candidate == extracted_name or candidate in extracted_name for candidate in expected_candidates):
-                return True
-        return False
+        zip_roots_ok = any(
+            any(candidate == extracted_name or candidate in extracted_name for candidate in expected_candidates)
+            for extracted_name in root_names
+        )
+        if not zip_roots_ok:
+            return False
+
+        extracted_folder = self._find_extracted_survey_folder(areaSym, zipName)
+        if not extracted_folder:
+            return False
+
+        spatial_path = os.path.join(extracted_folder, "spatial")
+        tabular_path = os.path.join(extracted_folder, "tabular")
+        if not os.path.isdir(spatial_path) or not os.path.isdir(tabular_path):
+            return False
+
+        return True
 
     ## ===================================================================================
     #function call in ProcessSurvey is currently commented out, so this is not used.
@@ -317,88 +386,102 @@ class BulkDownloader:
             #zipName = "wss_SSA_" + areaSym + db + "_[" + surveyDate + "].zip"
 
             zipURL = baseURL + zipName
+            tmp_zip_path = None
+            root_names = None
+            bytes_downloaded = 0
+            download_start = time()
+            unzip_seconds = 0.0
+            download_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "Accept": "*/*",
+                "Accept-Encoding": "identity",
+            }
             #TODO: send to logging file
             print(f"\tDownloading survey {areaSym} from Web Soil Survey...")
 
-            # Open request to Web Soil Survey for that zip file
             os.makedirs(self.outputFolder, exist_ok=True)
-            before_items = set(os.listdir(self.outputFolder))
+            tmp_zip_path = os.path.join(self.outputFolder, f"{zipName}.partial")
 
-            r = requests.get(zipURL, timeout=60)
-            r.raise_for_status()
+            if requests is not None:
+                r = requests.get(zipURL, timeout=(10, 300), stream=True, headers=download_headers)
+                r.raise_for_status()
+                with open(tmp_zip_path, "wb") as zip_file:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        if chunk:
+                            bytes_downloaded += len(chunk)
+                            zip_file.write(chunk)
+            else:
+                with urlopen(zipURL, timeout=60) as response, open(tmp_zip_path, "wb") as zip_file:
+                    while True:
+                        chunk = response.read(65536)
+                        if not chunk:
+                            break
+                        bytes_downloaded += len(chunk)
+                        zip_file.write(chunk)
 
-            zip_buffer = io.BytesIO(r.content)
-            if not zipfile.is_zipfile(zip_buffer):
-                raise zipfile.BadZipFile("Downloaded file is not a valid ZIP archive")
-
-            zip_buffer.seek(0)
-            with zipfile.ZipFile(zip_buffer) as z:
+            download_seconds = max(time() - download_start, 0.0001)
+            unzip_start = time()
+            with zipfile.ZipFile(tmp_zip_path, "r") as z:
                 bad_entry = z.testzip()
                 if bad_entry:
                     raise zipfile.BadZipFile(f"ZIP integrity check failed on entry: {bad_entry}")
 
                 root_names = {info.filename.split('/')[0] for info in z.infolist() if info.filename}
                 z.extractall(path=self.outputFolder)
+            unzip_seconds = max(time() - unzip_start, 0.0)
 
             if not self._validate_extraction(areaSym, zipName, root_names):
                 raise zipfile.BadZipFile("Downloaded ZIP did not extract to the expected SSURGO survey folder")
 
+            downloaded_mb = bytes_downloaded / (1024 * 1024)
+            mb_per_second = downloaded_mb / download_seconds
+            perf_message = (
+                f"{areaSym} download stats - size={downloaded_mb:.2f} MB, "
+                f"download={download_seconds:.2f}s, speed={mb_per_second:.2f} MB/s, "
+                f"unzip={unzip_seconds:.2f}s"
+            )
+            print(f"\t{perf_message}")
+            tlogger.info(perf_message)
+
+            if tmp_zip_path and os.path.exists(tmp_zip_path):
+                os.remove(tmp_zip_path)
+
             return [0, None]
 
-        except requests.HTTPError as e:
-            msgs = f'HTTP Error {e}'
+        except REQUEST_NETWORK_EXCEPTIONS as e:
+            msgs = f'Failed to download SSURGO file for {areaSym}: {e}'
             msgs = msgs + f"\n{zipURL}"
             tlogger.error(msgs)
+            if tmp_zip_path and os.path.exists(tmp_zip_path):
+                try:
+                    os.remove(tmp_zip_path)
+                except Exception:
+                    pass
+            self._clear_partial_survey_paths(areaSym, zipName)
             return [2, msgs]
 
-        except requests.Timeout as e:
-            msgs = 'Soil Data Access timeout error'
-            tlogger.error(f"{msgs}\n{zipURL}")
-            return [2, msgs]
-
-        except requests.RequestException as e:
-            msgs = f'Request error: {e}'
-            msgs = msgs + f"\n{zipURL}"
-            tlogger.error(msgs)
-            return [2, msgs]
-
-        except socket.error as e:
-            msgs = f'Socket error: {e}'
-            msgs = msgs + '\nAlso possible File Explorer needs tob be closed'
-            msgs = msgs + f"\n{zipURL}"
-            tlogger.error(msgs)
-            return [2, msgs]
-        
-        except socket.timeout as e:
-            msgs = f'Socket timeout error: {e}'
-            msgs = msgs + f"\n{zipURL}"
-            tlogger.error(msgs)
-            return [2, msgs]
-
-        except URLError as e:
-            msgs = f'URL error: {e}'
-            msgs = msgs + f"\n{zipURL}"
-            tlogger.error(msgs)
-            return [2, msgs]
-
-        except HTTPError as e:
-            msgs = f'HTTP error: {e}'
-            msgs = msgs + f"\n{zipURL}"
-            tlogger.error(msgs)
-            return [2, msgs]
-        
         except (zipfile.BadZipFile, zipfile.LargeZipFile) as e:
             msgs = f'Failed to unzip SSURGO file for {areaSym}: {e}'
             msgs = msgs + f"\n{zipURL}"
             tlogger.error(msgs)
-            self._clear_partial_survey_paths(areaSym, zipName)
+            if tmp_zip_path and os.path.exists(tmp_zip_path):
+                try:
+                    os.remove(tmp_zip_path)
+                except Exception:
+                    pass
+            self._clear_partial_survey_paths(areaSym, zipName, root_names)
             return [2, msgs]
-        
+
         except Exception as e:
             msgs = f'Unexpected download/unzip error for {areaSym}: {e}'
             msgs = msgs + f"\n{zipURL}"
             tlogger.error(msgs)
-            self._clear_partial_survey_paths(areaSym, zipName)
+            if tmp_zip_path and os.path.exists(tmp_zip_path):
+                try:
+                    os.remove(tmp_zip_path)
+                except Exception:
+                    pass
+            self._clear_partial_survey_paths(areaSym, zipName, root_names)
             return [2, msgs]
 
     ## ===================================================================================
@@ -450,23 +533,29 @@ class BulkDownloader:
             # First attempt to download zip file
             # if download_b:
                 # Does it need to specify download with .mdb file?
-            dcue, msg = self.GetDownload(areaSym, surveyDate) #, outputFolder)
+            dcue = 2
+            msgs = None
+            max_attempts = self.downloadRetryAttempts
+            for attempt in range(max_attempts):
+                if attempt > 0:
+                    sleep(self.downloadRetryDelaySeconds)
+                    print(f"\tRetrying {areaSym} after download/unzip failure")
+
+                dcue, msgs = self.GetDownload(areaSym, surveyDate)
+                if not dcue:
+                    break
+
             if dcue:
-                # Try downloading zip file a second time
-                sleep(20)
-                dcue, msgs = self.GetDownload(areaSym, surveyDate) #, outputFolder)
-                if dcue:
-                    # Failed to download
-                    return [dcue, msgs]
+                # Failed after retries
+                return [dcue, msgs]
+
             msgs = '\tSurvey successfully downloaded'
             return [0, msgs]
         
-        except:
-            pass
-            #TODO: print to log file (either here or to the method it returns to)
-            #func = sys._getframe(  ).f_code.co_name
-            #msgs = pyErr(func)
-            #return [2, msgs]
+        except Exception as e:
+            msgs = f'Unexpected survey processing error for {areaSym}: {e}'
+            tlogger.error(msgs)
+            return [2, msgs]
         
     def getSSAString(self):
         sQuery = """
@@ -477,6 +566,9 @@ class BulkDownloader:
         """.format(','.join(f"'{itm}'" for itm in self.surveyList))
         print(sQuery)
         url = config.get('sdaPostRestUrl')
+
+        self.serverError = False
+        self.formattedSSAList = []
 
         # Create request using JSON, return data as JSON
         dRequest = dict()
@@ -490,34 +582,49 @@ class BulkDownloader:
         #Refer to stackoverflow.com/questions/24518944/try-except-when-using-python-requests-module if I try this again.
         #The most promising solution is still raise_for_status(), even though it didn't initially work for me.
         jData = jData.encode('ascii')
-        
-        #TODO: nested try can be avoid and all exceptions (jsondecodeerror, httperror, urlerror) can be wrapped one exception blocked
-        #Also, error messages need to be print to logs.
+        jsonString = None
+        response = None
+        data = None
+
         try:
-            response = urllib.request.urlopen(url,jData,timeout=10)
-            try:
-                jsonString = response.read()
-                what = json.loads(jsonString)
-            except json.decoder.JSONDecodeError as error:
-                print('JSON error ' + error.msg)
-                #self.serverError = True
+            response = urllib.request.urlopen(url, jData, timeout=10)
+            jsonString = response.read()
+            data = json.loads(jsonString)
+        except json.decoder.JSONDecodeError as error:
+            print('JSON error ' + error.msg)
+            tlogger.error(f'JSON decode error for SDA response: {error}')
+            self.serverError = True
         except HTTPError as error:
-            print('Data not retrieved because ' + error) #.strerror)
+            print('Data not retrieved because ' + str(error))
             print(dRequest["query"])
+            tlogger.error(f'SDA HTTPError: {error}')
             self.serverError = True
         except URLError as error:
             if isinstance(error.reason, socket.timeout):
-                QgsMessageLog.logMessage('Socket timed out. ' + error.strerror)
+                try:
+                    QgsMessageLog.logMessage('Socket timed out. ' + error.reason.strerror)
+                except Exception:
+                    pass
                 self.serverError = True
             else:
-                QgsMessageLog.logMessage('Unknown server error')
+                try:
+                    QgsMessageLog.logMessage('Unknown server error')
+                except Exception:
+                    pass
                 self.serverError = True
-        else:
-            pass #self.logger.info('REST access successful')
-        
-        if self.serverError == False:
+            tlogger.error(f'SDA URLError: {error}')
+        except Exception as error:
+            tlogger.error(f'Unexpected error fetching SDA data: {error}')
+            self.serverError = True
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+
+        if self.serverError == False and data is not None:
             # Convert the returned JSON string into a Python dictionary.
-            data = json.loads(jsonString)
             del jsonString, jData, response
 
             # Iterate through dataList and reformat the data to create the menu choicelist
@@ -544,6 +651,14 @@ class BulkDownloader:
         # Use "<script> ?bulkDownload" to retrieve schemas with request and response fields.
         #=> ['CA642,  2023-09-11,  Stanislaus County, California, Western Part',...]
         self.getSSAString()
+        if self.serverError:
+            tlogger.error("Failed to retrieve SSA survey list from SDA service.")
+            return {
+                "status": False,
+                "allimported": False,
+                "failedSurveys": [],
+                "message": "Failed to retrieve SSA survey list from SDA service.",
+            }
         #for blah in self.formattedSSAList:
         #    ssa = blah.split(',')[0].strip().upper()
         #    date = blah.split(',')[1].strip()
@@ -564,8 +679,17 @@ class BulkDownloader:
                     for s in self.formattedSSAList
                     if s.split(',')[0].strip().upper() != 'HT600']
             self.surveyCount = len(self.paramSet)
-            threadCount = min(mp.cpu_count(), self.surveyCount)
-            print(f"\tRunning on {threadCount} threads.\n")
+
+            if self.surveyCount == 0:
+                return {
+                    "status": True,
+                    "allimported": True,
+                    "failedSurveys": [],
+                    "message": "No soil surveys were selected for download.",
+                }
+
+            threadCount = min(mp.cpu_count(), self.surveyCount, self.downloadMaxThreads)
+            print(f"\tRunning on {threadCount} threads (max configured: {self.downloadMaxThreads}).\n")
             successCount = 0
             failList = []
             # Run import process
@@ -601,13 +725,19 @@ class BulkDownloader:
                 print(f"\n{len(failList)} surveys failed to load:")
                 for ssa in failList:
                     print(f"\t{ssa}")
-                response = {"status": True, "allimported": False}
+                response = {
+                    "status": True,
+                    "allimported": False,
+                    "failedSurveys": failList,
+                    "message": f"{len(failList)} survey(s) failed to download or unzip.",
+                }
                 return response
             else:
                 response = {"status": True, "allimported": True}
                 return response
         
-        except:
+        except Exception as e:
+            tlogger.error(f"bulkDownload unexpected error: {e}")
             response = {"status": False, "allimported": False, "message": 'Failure during data download'}
             return response
         

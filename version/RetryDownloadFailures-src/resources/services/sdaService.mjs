@@ -52,7 +52,7 @@ export async function checkSurveyAreas(localRecords, SDA_URL){
 
     }else{
         //discrepancies.push({areaSymbol: '', message: "serverError", error: result.error});
-        discrepancies.serverError.push(result.error);
+        discrepancies.serverError.push(result.error ?? result.message ?? "Unknown SDA error");
     }
 
     return discrepancies;
@@ -62,6 +62,10 @@ export async function checkSurveyAreas(localRecords, SDA_URL){
 //const SDA_URL = "https://SDMDataAccess.sc.egov.usda.gov/Tabular/post.rest";
 
 export async function getSurveyAreas(areaSymbols, SDA_URL){
+
+    if (!areaSymbols || areaSymbols.length === 0) {
+        return {status: "success", records: []};
+    }
 
     let sqlQuery = `~DeclareVarchar255Table(@maTable)~;Insert into @maTable (s) values ${areaSymbols.map(value => `('${value}')`).join(', ')};SELECT * FROM SDA_Get_AreasymbolWktWgs84_from_AreasymbolTable(@maTable);`;
 
@@ -82,7 +86,7 @@ export async function getSurveyAreas(areaSymbols, SDA_URL){
 
     }catch(error){
         console.error('Failed to execute SDA post query: ', error);
-        return {status: "error", message: error, "records": []};
+        return {status: "error", error: String(error), message: String(error), records: []};
     }
 
 }

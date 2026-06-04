@@ -86,18 +86,16 @@ def installGdalWindows(showVerboseMessage: bool, versionString: str):
             tlogger.critical('Failed to extract GDAL Wheel: ' + str(e))
             tlogger.critical(traceback.format_exc())
             return (False, 'Failed to open GDAL Wheel: ' + str(e))
-        cmd = ["pip", "install", fileLocation]
+        cmd = [sys.executable, "-m", "pip", "install", fileLocation]
     else:
         # Case: Not in a PYZ, find the file in its expected location
-        scriptLocation = sys.argv[0].split('\\')
-        scriptLocation.pop()
-        scriptLocation = '\\'.join(scriptLocation)
-        whl = path.join(scriptLocation, whl.replace('/', '\\'))
+        scriptLocation = path.dirname(path.abspath(sys.argv[0]))
+        whl = path.join(scriptLocation, whl.replace('/', path.sep))
         if not path.isfile(whl):
             errormessage = f'Whl file ({whl}) does not exist'
             tlogger.critical(errormessage,stack_info=True)
             return (False, errormessage)
-        cmd = ["pip", "install", whl]
+        cmd = [sys.executable, "-m", "pip", "install", whl]
 
     # Perform the installation
     try:
@@ -235,7 +233,7 @@ def installLibrariesViaInternet(showVerboseMessage):
                 librariesToInstall.append(libraryName)
 
         if librariesToInstall:
-            cmd = ["pip", "install"] + librariesToInstall
+            cmd = [sys.executable, "-m", "pip", "install"] + librariesToInstall
             cmd = " ".join(cmd)
             internetInstallStartMsg = f'Installing library(ies) via Internet using cmd={cmd}'
             tlogger.info(internetInstallStartMsg)
