@@ -1,0 +1,25 @@
+name: Documentation request
+description: Request documentation additions or corrections.
+title: "docs: "
+labels:
+  - documentation
+body:
+  - type: textarea
+    id: gap
+    attributes:
+      label: Documentation gap
+      description: What is missing, unclear, or outdated?
+    validations:
+      required: true
+  - type: textarea
+    id: audience
+    attributes:
+      label: Audience and use case
+      description: Who needs this and for what workflow?
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested update
+      description: Optional proposed wording, structure, or references.
