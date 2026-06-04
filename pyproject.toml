@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ssurgo-portal"
+version = "0.1.0"
+description = "SSURGO portal tooling and development configuration"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "black>=24.0.0",
+  "flake8>=7.0.0",
+  "isort>=5.13.0",
+  "mypy>=1.10.0",
+  "pre-commit>=3.7.0",
+  "pytest>=8.0.0",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py311", "py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+exclude = ['^\.venv/']
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
