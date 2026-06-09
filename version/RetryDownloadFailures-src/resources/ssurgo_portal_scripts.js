@@ -610,7 +610,7 @@ class CheckboxTable extends Table {
             this.populateOutdatedSsaMessage()
         } else {
             this.oudatedSsaToggle.setAttribute('style', 'display: none')
-            else if (request == 'getstatus'){
+        }
 
         if(discrepencies && discrepencies.missingOnServer.length > 0){
             this.nonExistingSSAs = discrepencies.missingOnServer
@@ -619,31 +619,16 @@ class CheckboxTable extends Table {
         } else {
             this.nonExistingSsaToggle.setAttribute('style', 'display: none')
         }
-            logJavaScriptError(error?.stack || String(error))
-
-        // Need to implement logic here to dictate if a dbtable is being created or a folder table is being created
-        //buildTable(data.databaseItems, 'databaseTable')
-
-        //If we are expecting to return an item, return it.
-        if(returnedResponse != null){
-            return(returnedResponse)
-        }
-
-        return response
     }
-    catch(err){
-        const requestLabel = String(request ?? 'unknown-request')
-        if (err?.name === 'AbortError') {
-            sendLoggerWarning(`sendData timeout for request ${requestLabel}`)
+
+    setOutdatedSsaDisplay() {
+        if(this.outdatedSSAs.length > 0){
+            this.oudatedSsaToggle.removeAttribute('style')
         }
-        sendLoggerWarning(`sendData failure for request ${requestLabel}: ${String(err?.message ?? err)}`)
-        //The message in the Modal below only covers one error scenario. Other error Modals are needed.
-        $('#serverClosedModal').modal("show")
-        return null
-    }
-    finally {
-        clearTimeout(timeoutID)
+        else{
+            this.oudatedSsaToggle.setAttribute('style', 'display: none')
         }
+
         if(this.outdatedSsaInfoText.lastChild && this.outdatedSsaInfoText.lastChild.tagName == "P"){
             this.outdatedSsaInfoText.lastElementChild.remove()
         }

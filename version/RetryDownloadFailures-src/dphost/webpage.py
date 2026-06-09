@@ -1,5 +1,6 @@
 import io
 import json
+import mimetypes
 import os
 import shutil
 import socket
@@ -46,6 +47,21 @@ JS_MIME_TYPE = "text/javascript"
 CSS_MIME_TYPE = "text/css; charset=UTF-8"
 SVG_MIME_TYPE = "image/svg+xml"
 RESOURCE_SUFFIX = "/resources/"
+
+
+def _static_content_type(filename):
+    lower_name = str(filename).lower()
+    if lower_name.endswith((".js", ".mjs")):
+        return JS_MIME_TYPE
+    if lower_name.endswith(".css"):
+        return CSS_MIME_TYPE
+    if lower_name.endswith(".svg"):
+        return SVG_MIME_TYPE
+    if lower_name.endswith((".json", ".geojson", ".map")):
+        return "application/json"
+
+    guessed_mimetype, _ = mimetypes.guess_type(lower_name)
+    return guessed_mimetype or "application/octet-stream"
 
 
 class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
@@ -817,13 +833,14 @@ def _find_missing_folders(requested_folders):
 def server_static(filename):
     if config.isPyzFile:
         with ZipFile(zippath) as dpzip:
-            with io.TextIOWrapper(
-                dpzip.open('resources/' + filename),
-                encoding='utf-8',
-            ) as templateResult:
-                content = templateResult.readlines()
-                plaintext = ''.join(content)
-            return template(plaintext)
+            try:
+                payload = dpzip.read('resources/' + filename)
+            except KeyError:
+                response.status = 404
+                return ''
+
+        response.content_type = _static_content_type(filename)
+        return payload
     else:
         return static_file(filename, fullPath + RESOURCE_SUFFIX)
 
