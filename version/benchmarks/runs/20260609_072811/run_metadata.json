@@ -1,0 +1,9 @@
+{
+  "runId": "20260609_072811",
+  "startedUtc": "2026-06-09T13:28:11Z",
+  "workspaceRoot": "C:\\Users\\Jason.L.Nemecek\\Box\\github\\JasonNemecek-USDA\\ssurgo_portal\\version\\RetryDownloadFailures-src",
+  "profilePath": "C:\\Users\\Jason.L.Nemecek\\Box\\github\\JasonNemecek-USDA\\ssurgo_portal\\version\\benchmarks\\benchmark_profile_v1.0.0.118_national_full.json",
+  "manifestPath": "C:\\Users\\Jason.L.Nemecek\\Box\\github\\JasonNemecek-USDA\\ssurgo_portal\\version\\benchmarks\\area_manifest_v1.0.0.118_national_full.json",
+  "pythonVersion": "Python 3.14.3",
+  "notes": "Manual benchmark execution required. Use this run folder for evidence and summaries."
+}

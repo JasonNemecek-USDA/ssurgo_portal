@@ -2,6 +2,7 @@ import LeafletComponent from "./leafletComponent.mjs";
 import BrowserStorage from "./BrowserStorageFunctions.mjs";
 export default class DownloaderFunctions{
     static enableShapefileDownload = false;
+    static enableVerboseWorkerLogs = false;
     static stateButton = document.querySelector('[aria-controls="a1"]');
     static keywordButton = document.querySelector('[aria-controls="a2"]');
     static shapefileButton = document.querySelector('[aria-controls="a3"]');
@@ -12,6 +13,7 @@ export default class DownloaderFunctions{
     static srchSpinner = document.getElementById('ssaLoadingScreen');
     static mapTip = document.getElementById('mapTooltip');
     static worker = new Worker("/static/js/ssa-downloader.mjs", {type: 'module'});
+    static workerHandlersAttached = false;
 
     constructor(SDA_POSTREST_URL){
         this.mapIt = new LeafletComponent()
@@ -24,6 +26,8 @@ export default class DownloaderFunctions{
         this.deleteMethod = undefined;
         this.aoiRegions = [];
         this.ssaRunTotal = 0;
+        this.latestDownloadTelemetry = null;
+        this.latestGovernorState = null;
         this.SDA_POSTREST_URL = SDA_POSTREST_URL
         this.mapIt.shapefileFeatureGroup = new L.FeatureGroup().addTo(this.mapIt._map)
         this.mapIt.SSAGrp = L.featureGroup().addTo(this.mapIt._map)
@@ -34,6 +38,7 @@ export default class DownloaderFunctions{
         this.initializeMap = this.initializeMap.bind(this)
         this.ssaDelete = this.ssaDelete.bind(this)
         this.workerEvents = this.workerEvents.bind(this)
+        this.workerErrorEvents = this.workerErrorEvents.bind(this)
         this.getSSAByFile = this.getSSAByFile.bind(this)
 
         document.getElementById("ssaselector").DownloaderFunctionsItems = this
@@ -71,6 +76,16 @@ export default class DownloaderFunctions{
         if(selectedValue != ''){
             const selectedOption = event.target.selectedOptions[0];
             const selectedText = selectedOption.text;
+            if(selectedValue === '__ALL__'){
+                this.getSSAByKeyword('%');
+                return;
+            }
+
+            if(selectedValue === '__CONUS__'){
+                this.getSSAByKeyword('CONUS');
+                return;
+            }
+
             this.getSSAByState(selectedValue, selectedText);
         }
     }
@@ -96,6 +111,12 @@ export default class DownloaderFunctions{
             const keyword = keywordSrch.value;
             this.getSSAByKeyword(keyword);
         });
+        keywordSrch.addEventListener('keydown', (event) => {
+            if(event.key === 'Enter'){
+                event.preventDefault();
+                this.getSSAByKeyword(keywordSrch.value);
+            }
+        });
         this.setDownloaderEventListeners()
         this.isDrawing = false;
         await this.initializeMap()
@@ -103,45 +124,317 @@ export default class DownloaderFunctions{
     setupWorker(){
         //Send cookies to downloader.
         DownloaderFunctions.worker.postMessage({"command" : "return-urls", "urls" : {"wssDownloadUrl" : BrowserStorage.getUrlCookie('wssDownloadUrl'), "sdaPostRestUrl" : BrowserStorage.getUrlCookie("sdaPostRestUrl")}})
+        if(DownloaderFunctions.workerHandlersAttached){
+            return
+        }
+
         DownloaderFunctions.worker.addEventListener("message", (e) => {this.workerEvents(e)});
+        DownloaderFunctions.worker.addEventListener("error", (e) => {this.workerErrorEvents(e)});
+        DownloaderFunctions.worker.addEventListener("messageerror", (e) => {this.workerErrorEvents(e)});
+        DownloaderFunctions.workerHandlersAttached = true
     }
+
+    workerErrorEvents(event){
+        const progressDisplayComp = document.getElementById("progressdisplay");
+        const eventMessage = String(event?.message ?? event?.type ?? 'Worker error')
+
+        document.getElementById('downloadBtn').disabled = false;
+        progressDisplayComp.populateErrorMessage(`<b>Error Message:</b> ${eventMessage}`);
+        progressDisplayComp.stop(this.successAreas, this.failedAreas, 'download', false);
+        progressDisplayComp.removeEventListener("onStopAction", DownloaderFunctions.handleStopDownload);
+    }
+
+    static normalizeDownloadPath(path){
+        const normalized = String(path ?? '').trim().replaceAll('\\', '/');
+        if(!normalized){
+            return '';
+        }
+
+        // Keep drive roots stable (C:/) while trimming trailing separators elsewhere.
+        if(/^[A-Za-z]:\/?$/.test(normalized)){
+            return normalized.replace(':/', ':') + '/';
+        }
+
+        return normalized.replace(/\/+$/, '');
+    }
+
+    static isDriveRootPath(path){
+        return /^[A-Za-z]:\/?$/.test(path);
+    }
+
+    async validateDownloadDestination(folderPath){
+        if(!folderPath){
+            return {
+                success: false,
+                message: 'Select a download folder before starting.'
+            }
+        }
+
+        if(DownloaderFunctions.isDriveRootPath(folderPath)){
+            return {
+                success: false,
+                message: 'The root of a drive is not a valid download target. Choose a writable subfolder, for example C:/Users/<you>/Downloads/SSURGO.'
+            }
+        }
+
+        try{
+            const response = await fetch('/validateDownloadFolder', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({location: folderPath}),
+            })
+
+            if(!response.ok){
+                return {
+                    success: false,
+                    message: `Unable to validate download folder (${response.status}).`
+                }
+            }
+
+            const payload = await response.json()
+            if(payload?.success){
+                return {success: true}
+            }
+
+            return {
+                success: false,
+                message: payload?.message ?? 'Download folder validation failed.'
+            }
+        }
+        catch(error){
+            return {
+                success: false,
+                message: `Unable to validate download folder: ${error?.message ?? error}`
+            }
+        }
+    }
+
+    async runDownloadPreflight(folderPath, selectedAreaCount){
+        const normalizedCount = Number.isFinite(selectedAreaCount)
+            ? Math.max(0, selectedAreaCount)
+            : 0
+        const minFreeDiskMb = Math.max(4096, Math.ceil(normalizedCount * 80))
+        const minAvailableMemoryMb = 1024
+
+        try{
+            const response = await fetch('/preflightDownload', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    location: folderPath,
+                    minFreeDiskMb,
+                    minAvailableMemoryMb,
+                }),
+            })
+
+            if(!response.ok){
+                return {
+                    success: false,
+                    message: `Unable to run preflight checks (${response.status}).`,
+                }
+            }
+
+            const payload = await response.json()
+            if(payload?.success){
+                return {
+                    success: true,
+                    message: payload?.message ?? 'Preflight checks passed.',
+                }
+            }
+
+            return {
+                success: false,
+                message: payload?.message ?? 'Preflight checks failed.',
+            }
+        }
+        catch(error){
+            return {
+                success: false,
+                message: `Unable to run preflight checks: ${error?.message ?? error}`,
+            }
+        }
+    }
+
+    async getDefaultDownloadDestination(){
+        try{
+            const response = await fetch('/defaultDownloadFolder', {method: 'GET'})
+            if(!response.ok){
+                return {
+                    success: false,
+                    message: `Unable to resolve default download folder (${response.status}).`
+                }
+            }
+
+            const payload = await response.json()
+            if(payload?.success && typeof payload.path === 'string'){
+                return {
+                    success: true,
+                    path: DownloaderFunctions.normalizeDownloadPath(payload.path),
+                    source: 'default download folder'
+                }
+            }
+
+            return {
+                success: false,
+                message: payload?.message ?? 'Unable to resolve default download folder.'
+            }
+        }
+        catch(error){
+            return {
+                success: false,
+                message: `Unable to resolve default download folder: ${error?.message ?? error}`
+            }
+        }
+    }
+
+    async resolveDownloadDestination(rawFolderPath){
+        const primaryPath = DownloaderFunctions.normalizeDownloadPath(rawFolderPath)
+        const fallbackPath = DownloaderFunctions.normalizeDownloadPath(
+            BrowserStorage.getLocalStorage('downloadpath')
+        )
+        const databaseFolderPath = DownloaderFunctions.normalizeDownloadPath(
+            BrowserStorage.getLocalStorage('getdatabaseinventory')
+        )
+
+        const candidatePaths = [
+            {path: primaryPath, source: 'selected folder'},
+            {path: fallbackPath, source: 'last used download folder'},
+            {path: databaseFolderPath, source: 'selected database folder'},
+        ]
+
+        let lastFailureMessage = 'Unable to determine a valid download folder.'
+        const seen = new Set()
+        for(const candidate of candidatePaths){
+            if(!candidate.path || seen.has(candidate.path)){
+                continue
+            }
+
+            seen.add(candidate.path)
+            const validation = await this.validateDownloadDestination(candidate.path)
+            if(validation.success){
+                return {
+                    success: true,
+                    path: candidate.path,
+                    source: candidate.source,
+                }
+            }
+
+            lastFailureMessage = validation.message ?? lastFailureMessage
+        }
+
+        const defaultDestination = await this.getDefaultDownloadDestination()
+        if(defaultDestination.success){
+            const validation = await this.validateDownloadDestination(defaultDestination.path)
+            if(validation.success){
+                return {
+                    success: true,
+                    path: defaultDestination.path,
+                    source: defaultDestination.source,
+                }
+            }
+
+            lastFailureMessage = validation.message ?? lastFailureMessage
+        }
+        else if(defaultDestination.message){
+            lastFailureMessage = defaultDestination.message
+        }
+
+        return {
+            success: false,
+            message: lastFailureMessage,
+        }
+    }
+
     workerEvents(e){
         const progressDisplayComp = document.getElementById("progressdisplay");
-        const areaSymbols = document.getElementById('ssaselector').getAreaSymbols();
+        const ssaSelector = document.getElementById('ssaselector');
+        const areaSymbols = (ssaSelector && typeof ssaSelector.getAreaSymbols === 'function')
+            ? ssaSelector.getAreaSymbols()
+            : [];
+        const totalAreas = Array.isArray(areaSymbols) ? areaSymbols.length : 0;
         switch(e.data.name){
             case "download-complete":
-            case "download-cancelled":
                 //make download button available
                 document.getElementById('downloadBtn').disabled = false;
                 progressDisplayComp.stop(this.successAreas, this.failedAreas, 'download', true);
                 progressDisplayComp.removeEventListener("onStopAction", DownloaderFunctions.handleStopDownload);
-                break;            
-            case "download-status":          
-
-                const {areaSymbol, fileName} = e.data.file;
-                if(e.data.success){                
-                    console.log(`${fileName} downloaded successfuly`);       
-                    this.successAreas.push(areaSymbol);
-                    progressDisplayComp.successValue++;                         
-                    progressDisplayComp.progressCounterMessage = `${progressDisplayComp.successValue} out of ${areaSymbols.length} Survey Areas downloaded. ${progressDisplayComp.failValue} downloads failed.`;
-                    progressDisplayComp.populateSuccessMessage(`${areaSymbol} successfully downloaded.`);
-                }else{
-                    console.log(`${fileName} downloaded failed`);
-                    this.failedAreas.push(areaSymbol);
-                    progressDisplayComp.failValue++;                     
-                    progressDisplayComp.progressCounterMessage = `${progressDisplayComp.successValue} out of ${areaSymbols.length} Survey Areas downloaded. ${progressDisplayComp.failValue} downloads failed.`;                           
-                    progressDisplayComp.populateErrorMessage(`${areaSymbol} <b>Error Message:</b> failed download.`);
-                }
-
                 break;
-            case "download-error":
+            case "download-cancelled": {
                 //make download button available
                 document.getElementById('downloadBtn').disabled = false;
+                const cancelReason = e.data?.reason ?? e.data?.code ?? 'user_cancelled';
+                const cancelMessage = e.data?.message ?? 'Download cancelled.';
+                progressDisplayComp.populateErrorMessage(`<b>Download Cancelled:</b> ${cancelMessage} (<b>reason:</b> ${cancelReason})`);
                 progressDisplayComp.stop(this.successAreas, this.failedAreas, 'download', false);
                 progressDisplayComp.removeEventListener("onStopAction", DownloaderFunctions.handleStopDownload);
                 break;
+            }
+            case "download-status": {
+                const fileObj = e.data.file ?? {};
+                const areaSymbol = fileObj.areaSymbol ?? fileObj.fileName ?? 'Unknown area';
+                const fileName = fileObj.fileName ?? areaSymbol;
+                const errorMessage = e.data.message ?? 'failed download.';
+                const errorCode = e.data.code ? String(e.data.code) : 'download_failed';
+                const stage = e.data.stage ? String(e.data.stage) : 'unknown';
+                const retryableLabel = e.data.retryable === false ? 'non-retryable' : (e.data.retryable === true ? 'retryable' : 'retryability-unknown');
+                if(e.data.success){                
+                    if(DownloaderFunctions.enableVerboseWorkerLogs){
+                        console.log(`${fileName} downloaded successfully`);
+                    }
+                    this.successAreas.push(areaSymbol);
+                    progressDisplayComp.successValue++;                         
+                    progressDisplayComp.progressCounterMessage = `${progressDisplayComp.successValue} out of ${totalAreas} Survey Areas downloaded. ${progressDisplayComp.failValue} downloads failed.`;
+                    progressDisplayComp.populateSuccessMessage(`${areaSymbol} successfully downloaded.`);
+                }else{
+                    if(DownloaderFunctions.enableVerboseWorkerLogs){
+                        console.log(`${fileName} download failed`);
+                    }
+                    this.failedAreas.push(areaSymbol);
+                    progressDisplayComp.failValue++;                     
+                    progressDisplayComp.progressCounterMessage = `${progressDisplayComp.successValue} out of ${totalAreas} Survey Areas downloaded. ${progressDisplayComp.failValue} downloads failed.`;                           
+                    progressDisplayComp.populateErrorMessage(`${areaSymbol} <b>Error Message:</b> ${errorMessage} (<b>code:</b> ${errorCode}; <b>stage:</b> ${stage}; <b>type:</b> ${retryableLabel})`);
+                }
+
+                break;
+            }
+            case "download-error":
+                //make download button available
+                document.getElementById('downloadBtn').disabled = false;
+                if(e.data?.message){
+                    const errorCode = e.data?.code ? String(e.data.code) : 'download_error';
+                    const stage = e.data?.stage ? String(e.data.stage) : 'unknown';
+                    const retryableLabel = e.data?.retryable === false ? 'non-retryable' : (e.data?.retryable === true ? 'retryable' : 'retryability-unknown');
+                    progressDisplayComp.populateErrorMessage(`<b>Error Message:</b> ${e.data.message} (<b>code:</b> ${errorCode}; <b>stage:</b> ${stage}; <b>type:</b> ${retryableLabel})`);
+                }
+                progressDisplayComp.stop(this.successAreas, this.failedAreas, 'download', false);
+                progressDisplayComp.removeEventListener("onStopAction", DownloaderFunctions.handleStopDownload);
+                break;
+            case "download-telemetry": {
+                this.latestDownloadTelemetry = e.data?.telemetry ?? null;
+                if(DownloaderFunctions.enableVerboseWorkerLogs && this.latestDownloadTelemetry){
+                    console.log("download telemetry", this.latestDownloadTelemetry);
+                }
+                break;
+            }
+            case "download-governor": {
+                this.latestGovernorState = e.data?.governor ?? null;
+                if(!this.latestGovernorState){
+                    break;
+                }
+
+                if(this.latestGovernorState.severity === 'warning'){
+                    progressDisplayComp.populateErrorMessage(
+                        `<b>Throughput Governor:</b> ${this.latestGovernorState.message}`
+                    );
+                }
+
+                if(DownloaderFunctions.enableVerboseWorkerLogs){
+                    console.log("download governor", this.latestGovernorState);
+                }
+                break;
+            }
             case "urls-set":
-                fetch('http://localhost:8083/tlogger/info:urls%20sent%20to%20worker')
+                fetch('/tlogger/info:urls%20sent%20to%20worker')
                 break;
             case "message-received":
                 break;
@@ -249,6 +542,9 @@ export default class DownloaderFunctions{
     }
 
     highlightAreasymbol(areaSymbol) {
+        if (!this.mapIt.mapLayerSSA) {
+            return;
+        }
         //eachLayer() also works when iterating over a .geojson file, use eachFeature() when iterating over web service features
         let clickedLayer = null;
         this.mapIt.mapLayerSSA.eachLayer((layer) => {
@@ -366,22 +662,6 @@ export default class DownloaderFunctions{
 
         DownloaderFunctions.srchSpinner.removeAttribute('style');
 
-        // works but needs more work
-        if(this.deleteMethod === '_deleteSSA'){
-            //pass
-        }
-        else if(this.deletedStates && this.deletedStates.includes(stateName) && this.deleteMethod === "_deleteAll"){
-            this.selectedRegions = this.selectedRegions.filter(item => item !== stateName);
-            this.deletedStates = this.deletedStates.filter(item => item !== stateName);
-        }else if (this.selectedRegions.includes(stateName)){
-            //TODO: Replace with USWDS compatiple alert. Search on "usa-alert usa-alert--warning"
-            alert(`${stateName} areasymbols are already in the list.`);
-            DownloaderFunctions.srchSpinner.setAttribute('style','display: none;');
-            return;
-        }else{
-            this.selectedRegions.push(stateName);
-        }
-
         //SAVEREST is a date in this format YYYY-MM-DD which I will need if I want to overwrite only with more recent data.
         const sqlQuery = `SELECT AREASYMBOL, AREANAME, CONVERT(varchar(10), [SAVEREST], 126) AS SAVEREST FROM SASTATUSMAP WHERE AREASYMBOL LIKE '${stateAbbr}%' ORDER BY AREASYMBOL`;
         try {
@@ -403,26 +683,65 @@ export default class DownloaderFunctions{
                     throw new Error('No soil survey areas found for ' + stateName + ', ' + stateAbbr);
                 }
             } else {
-                fetch('http://localhost:8083/tlogger/warning:'+response.status);
+                fetch('/tlogger/warning:'+response.status);
                 console.error('Error fetching data: ', response.status);
             }
         } catch (error) {
             const errStr = 'An error occurred: '+error;
-            fetch('http://localhost:8083/tlogger/warning:'+errStr);
+            fetch('/tlogger/warning:'+errStr);
             console.error(errStr);
         }
         DownloaderFunctions.srchSpinner.setAttribute('style', 'display:none;');
     }
 
+    getLocalSSAByKeyword(keystr) {
+        if(!this.mapIt?.mapLayerSSA){
+            return null;
+        }
+
+        const normalizedKey = String(keystr ?? '').toUpperCase();
+        const conusExcludedPrefixes = ['MXNL', 'AK', 'HI', 'FM', 'GU', 'HT', 'MH', 'MP', 'PR', 'PW', 'VI'];
+        const localRows = new Set();
+
+        this.mapIt.mapLayerSSA.eachLayer((layer) => {
+            const properties = layer?.feature?.properties ?? {};
+            const areaSymbol = String(properties.areasymbol ?? '').toUpperCase();
+            const areaName = String(properties.areaname ?? '').trim();
+
+            if(!areaSymbol || areaSymbol === 'HT600'){
+                return;
+            }
+
+            if(normalizedKey === 'CONUS' && conusExcludedPrefixes.some((prefix) => areaSymbol.startsWith(prefix))){
+                return;
+            }
+
+            localRows.add(`${areaSymbol}, ${areaName}`);
+        });
+
+        return Array.from(localRows).sort((left, right) => left.localeCompare(right));
+    }
+
     async getSSAByKeyword(keystr) {
         let where = '';                         //WHERE clause is not needed if user wants all areasymbols.
         keystr = keystr.replaceAll("'", "''").replaceAll('"', "''").replaceAll('*','%').trim()  //Perform basic sanatization and allows a user to use either % or * as a wildcard
+        const isWildcardOnlySearch = keystr.length > 0 && keystr.replaceAll('%', '') === '';
         if(keystr.length === 0) {
             //TODO: Replace with USWDS compatiple alert. Search on "usa-alert usa-alert--warning"
             alert("Please enter a search term.")
             return
         }
         DownloaderFunctions.srchSpinner.removeAttribute('style');
+
+        // Resolve broad searches from the locally loaded GeoJSON to avoid remote query failures.
+        if(isWildcardOnlySearch || keystr.toUpperCase() === 'CONUS'){
+            const localMatches = this.getLocalSSAByKeyword(keystr);
+            if(Array.isArray(localMatches) && localMatches.length > 0){
+                this.makeSSAList(localMatches);
+                DownloaderFunctions.srchSpinner.setAttribute('style', 'display:none;');
+                return;
+            }
+        }
 
         //If there is anything else in the keystr, any instance of CONUS/conus will be treated as an Invalid Search String
         //This does include something as innocuous as CONUS,
@@ -441,7 +760,7 @@ export default class DownloaderFunctions{
                 AND AREASYMBOL NOT LIKE 'PW%'
                 AND AREASYMBOL NOT LIKE 'VI%'
             `;
-        } else if (keystr == '%');  //nothing to add to the SQL statement if user wants all areasymbols
+        } else if (isWildcardOnlySearch);  //nothing to add to the SQL statement if user wants all areasymbols
         else {
             where = `AND (AREASYMBOL LIKE '%${keystr}%' OR AREANAME LIKE '%${keystr}%')`;
         }
@@ -473,8 +792,17 @@ export default class DownloaderFunctions{
                     throw new Error('No soil survey areas found for ' + keystr);
                 }
             } else {
-                console.error('Error fetching data: ', response.status);
-                alert('Error fetching data: ', response.status);
+                let responseDetails = '';
+                try {
+                    responseDetails = await response.text();
+                } catch (_) {
+                    responseDetails = '';
+                }
+
+                const errorMessage = `Error fetching data (${response.status}${response.statusText ? ` ${response.statusText}` : ''}).`;
+                console.error(errorMessage, responseDetails);
+                fetch('/tlogger/warning:' + encodeURIComponent(`${errorMessage} ${responseDetails.slice(0, 240)}`));
+                alert(errorMessage);
             }
         } catch (error) {
             console.error('An error occurred: ', error);
@@ -491,36 +819,37 @@ export default class DownloaderFunctions{
         // const sqlPolygonIntersectSSA = `SELECT * FROM SDA_Get_Areasymbol_from_intersection_with_WktWgs84('${wktGeometry}')`;
         // example rest endpoint: https://SDMDataAccess-test.cert.sc.egov.usda.gov/Tabular/post.rest
 
-        await Promise.all(wktSQL.map(sqlCommand => {
-            return fetch(this.SDA_POSTREST_URL, {
-                method: 'POST',
-                body: JSON.stringify({
-                    'query': sqlCommand
+        try {
+            const areaSymbolGroups = await Promise.all(
+                wktSQL.map(async (sqlCommand) => {
+                    const response = await fetch(this.SDA_POSTREST_URL, {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            'query': sqlCommand
+                        })
+                    });
+
+                    if(!response.ok){
+                        const responseDetails = await response.text().catch(() => '');
+                        throw new Error(
+                            `Intersection query failed (${response.status}${response.statusText ? ` ${response.statusText}` : ''}). ${responseDetails.slice(0, 240)}`
+                        );
+                    }
+
+                    const xmlText = await response.text();
+                    const parser = new DOMParser();
+                    const xmlDoc = parser.parseFromString(xmlText, 'text/xml');
+                    const tables = xmlDoc.getElementsByTagName('Table');
+
+                    return Array.from(tables)
+                        .map((table) => table.getElementsByTagName('areasymbol')[0]?.textContent?.trim()?.toUpperCase())
+                        .filter(Boolean);
                 })
-            });
-        }
-        )).then(async responses =>  {
-            const textPromises = responses.map(response => response.text());
-            const textArray = await Promise.all(textPromises);
-            const textContents = textArray;
-            let areasymbols = [];
-            textContents.forEach(xmlText => {
-                let parser = new DOMParser();
-                let xmlDoc = parser.parseFromString(xmlText, 'text/xml');
-                let tables = xmlDoc.getElementsByTagName('Table');
-            areasymbols.push(Array.from(tables).map((table) => {
-                    // In getSSAByState I also get the areaname, but 
-                    // SDA_Get_Areasymbol_from_intersection_with_WktWgs84 only returns the areasymbol
-                    const areasymbolElement = table.getElementsByTagName('areasymbol')[0];
-                    return areasymbolElement.textContent;
-                    }));
-                });
-                // flatten output (if multiple AOIs encountered)
-                return ([].concat.apply([], areasymbols))
-            }).then(areasymbols => {
-            //If a user's AOI contain multiple polygons that result in common areasymbol matches, this will exclude the "redundant" matches
-            //To be connected with IDL logical reconfiguration (-180/180)
-            //this is not currently hitting
+            );
+
+            let areasymbols = [...new Set([].concat.apply([], areaSymbolGroups))];
+
+            // If a user's AOI contains multiple polygons that produce common matches, keep only new areas.
             if (multipolygon) {
                 areasymbols = areasymbols.filter(itm => !this.aoiRegions.includes(itm));
                 for (let area of areasymbols) {
@@ -529,42 +858,53 @@ export default class DownloaderFunctions{
                     }
                 }
             }
-            // secondary areaname and date request
-            let ssaInfo;
+
+            if(areasymbols.length === 0){
+                alert('Drawn polygon does not intersect with any Soil Survey Areas.');
+                return;
+            }
+
             const sqlGetAreaData = `
-            SELECT AREASYMBOL, 
+            SELECT AREASYMBOL,
                     AREANAME,
                     CONVERT(varchar(10),
-                    [SAVEREST], 126) AS SAVEREST 
+                    [SAVEREST], 126) AS SAVEREST
                     FROM SASTATUSMAP
-                    WHERE AREASYMBOL IN (${areasymbols.map(symbol => `'${symbol}'`).join(', ')}) 
+                    WHERE AREASYMBOL IN (${areasymbols.map(symbol => `'${symbol}'`).join(', ')})
                     ORDER BY AREASYMBOL`;
-            // example rest endpoint: https://SDMDataAccess-test.cert.sc.egov.usda.gov/Tabular/post.rest
-            fetch(this.SDA_POSTREST_URL, {
+
+            const detailResponse = await fetch(this.SDA_POSTREST_URL, {
                 method: 'POST',
                 body: JSON.stringify({
                     'query': sqlGetAreaData
                 })
-            }).then(async response => {
-                const data = await response.text();
-                ssaInfo = DownloaderFunctions.parseXML(data);
-                if (ssaInfo.length > 0) {
-                    this.makeSSAList(ssaInfo);
-                } else {
-                    console.error(`Polygon does not intersect any soil survey areas.`);
-                }
-            }).catch(error => {
-                DownloaderFunctions.tloggerWarning(error)
             });
+
+            if(!detailResponse.ok){
+                const responseDetails = await detailResponse.text().catch(() => '');
+                throw new Error(
+                    `Intersection detail query failed (${detailResponse.status}${detailResponse.statusText ? ` ${detailResponse.statusText}` : ''}). ${responseDetails.slice(0, 240)}`
+                );
+            }
+
+            const data = await detailResponse.text();
+            const ssaInfo = DownloaderFunctions.parseXML(data);
+            if (ssaInfo.length > 0) {
+                this.makeSSAList(ssaInfo);
+            } else {
+                alert('Drawn polygon does not intersect with any Soil Survey Areas.');
+            }
+        } catch(error) {
+            DownloaderFunctions.tloggerWarning(error);
+            alert('Unable to fetch Soil Survey Areas for the drawn polygon. Please try again.');
+        } finally {
             DownloaderFunctions.srchSpinner.setAttribute('style', 'display:none;');
-        }).catch(error => {
-            tloggerWarning(error)
-        });
+        }
 
     }
     static tloggerWarning(error){
         const errStr = 'An error occurred: ' + error;
-        fetch('http://localhost:8083/tlogger/warning:' + errStr);
+        fetch('/tlogger/warning:' + encodeURIComponent(errStr));
         console.error('Generic error: ', error)
     }
 
@@ -579,9 +919,46 @@ export default class DownloaderFunctions{
         this.failedAreas = [];
 
         const progressDisplayComp = document.getElementById("progressdisplay");
-        const folderPath = document.getElementById('downloadTextBox').value.replaceAll('\\', "/")
+        const rawFolderPath = document.getElementById('downloadTextBox').value
         const overwriteflg = document.getElementById('downloadOverwriteFlg').checked;
         const areaSymbols = document.getElementById('ssaselector').getAreaSymbols();
+
+        if(!Array.isArray(areaSymbols) || areaSymbols.length === 0){
+            alert('No survey areas were selected.')
+            document.getElementById('downloadBtn').disabled = false;
+            return
+        }
+
+        const resolvedDestination = await this.resolveDownloadDestination(rawFolderPath)
+        if(!resolvedDestination.success){
+            alert(resolvedDestination.message)
+            document.getElementById('downloadBtn').disabled = false;
+            return
+        }
+
+        const folderPath = resolvedDestination.path
+
+        const preflightResult = await this.runDownloadPreflight(
+            folderPath,
+            areaSymbols.length,
+        )
+        if(!preflightResult.success){
+            alert(preflightResult.message)
+            document.getElementById('downloadBtn').disabled = false;
+            return
+        }
+
+        if(DownloaderFunctions.normalizeDownloadPath(rawFolderPath) !== folderPath){
+            fetch('/tlogger/info:' + encodeURIComponent(
+                `Download destination auto-resolved to ${folderPath} (${resolvedDestination.source}).`
+            ))
+        }
+
+        if(preflightResult.message){
+            fetch('/tlogger/info:' + encodeURIComponent(preflightResult.message))
+        }
+
+        document.getElementById('downloadTextBox').value = folderPath
 
         //disable download button while downloading files
         document.getElementById('downloadBtn').disabled = true;
@@ -671,11 +1048,11 @@ export default class DownloaderFunctions{
         })
         .catch(error => {
             const errStr = 'Error loading GeoJSON: ' + error;
-            fetch('http://localhost:8083/tlogger/warning:'+errStr);
+            fetch('/tlogger/warning:'+errStr);
             console.error(errStr);
         });
 
-        await fetch('http://localhost:8083/static/sapoly.geojson')
+        await fetch('/static/sapoly.geojson')
         .then(response => response.json())
         .then(geojsonSSA => {
             // Adjust the coordinates of features in the South Pacific
@@ -1095,13 +1472,13 @@ export default class DownloaderFunctions{
                 this.getSSAIntersect(mapConstructorPoly.wkts, true);
             } else {
                 const warnStr = 'Unsupported geometry type: ' + userJson.type;
-                fetch('http://localhost:8083/tlogger/warning:'+warnStr);
+                fetch('/tlogger/warning:'+warnStr);
                 console.warn(warnStr);
             }
         } catch (error) {
             const errStr = 'GeoJSON processing error: ' + error;
             console.error(errStr);
-            fetch('http://localhost:8083/tlogger/warning:'+errStr);
+            fetch('/tlogger/warning:'+errStr);
         }
     }
     log(result){
@@ -1140,7 +1517,7 @@ export default class DownloaderFunctions{
                 }
                 catch(error){
                     const errStr = 'Error reading user file: ' + error;
-                    fetch('http://localhost:8083/tlogger/warning: '+errStr);
+                    fetch('/tlogger/warning: '+errStr);
                     console.error(errStr);
                 }
             } else if (file.name.endsWith('.geojson')) {
@@ -1154,7 +1531,7 @@ export default class DownloaderFunctions{
             }
         } catch (error) {
             const errStr = 'Error reading user file: ' + error;
-            fetch('http://localhost:8083/tlogger/warning: '+errStr);
+            fetch('/tlogger/warning: '+errStr);
             console.error(errStr);
             return;
         }

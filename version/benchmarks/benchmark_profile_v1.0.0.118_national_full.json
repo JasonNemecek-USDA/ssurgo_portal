@@ -1,0 +1,57 @@
+{
+  "profileId": "benchmark-national-full-v1.0.0.118",
+  "applicationVersion": "1.0.0.118",
+  "createdUtc": "2026-06-09T00:00:00Z",
+  "objective": "Meet full national manifest SLA with resilient, observable throughput.",
+  "sla": {
+    "metric": "full_manifest_duration_minutes",
+    "percentile": "p95",
+    "thresholdMinutes": 30,
+    "noFailureRateRegression": true,
+    "accountingRequirement": "every selected area is success or categorized fail"
+  },
+  "workload": {
+    "type": "national_full_manifest",
+    "manifestFile": "area_manifest_v1.0.0.118_national_full.json",
+    "excludeAreaSymbols": [
+      "HT600"
+    ]
+  },
+  "runtimePolicy": {
+    "mode": "managed_fallback",
+    "supportedPythonVersions": [
+      "3.9",
+      "3.10",
+      "3.11"
+    ],
+    "allowUnsupportedEntryVersion": true,
+    "requireStartupRuntimeMetadataLog": true
+  },
+  "sampling": {
+    "telemetryIntervalSeconds": 60,
+    "requiredMetrics": [
+      "elapsedMs",
+      "completed",
+      "failed",
+      "retryQueued",
+      "cpuPercent",
+      "memoryPercent",
+      "memoryUsedMb",
+      "memoryAvailableMb",
+      "pipelineActive",
+      "pipelinePending",
+      "uploadActive",
+      "uploadPending",
+      "ioActive",
+      "ioPending"
+    ]
+  },
+  "validationMatrix": {
+    "machines": [
+      "Kyle",
+      "Alena"
+    ],
+    "runsPerMachine": 3,
+    "report": "Baseline-Report-v1.0.0.117.md"
+  }
+}

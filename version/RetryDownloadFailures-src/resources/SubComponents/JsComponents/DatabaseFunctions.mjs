@@ -304,12 +304,19 @@ export default class DatabaseFunctions{
     }
 
     setupListeners(){
-        document.getElementById("deleteBtn").addEventListener("click", ()=>{
-            this.deleteCandidates()
-        })
-        document.getElementById("importBtn").addEventListener("click", ()=>{
-            this.importCandidates()
-        })
+        const deleteBtn = document.getElementById("deleteBtn")
+        if (deleteBtn){
+            deleteBtn.addEventListener("click", ()=>{
+                this.deleteCandidates()
+            })
+        }
+
+        const importBtn = document.getElementById("importBtn")
+        if (importBtn){
+            importBtn.addEventListener("click", ()=>{
+                this.importCandidates()
+            })
+        }
     }
 
 }

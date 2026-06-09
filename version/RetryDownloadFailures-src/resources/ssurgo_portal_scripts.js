@@ -4,29 +4,48 @@ let SDA_POSTREST_URL = null
 let osPathSep = null
 let RasterFunctions = null
 let DatabaseFunctions = null
+let moduleInitPromise = null
 async function initializeModules(){
-    try{
-        BrowserStorage = (await import("/static/SubComponents/JsComponents/BrowserStorageFunctions.mjs")).default
-        SDA_POSTREST_URL =  BrowserStorage.getUrlCookie("sdaPostRestUrl")
-        osPathSep = BrowserStorage.getOsPathSep()
-        const myDownloaderFunctions = (await import("/static/SubComponents/JsComponents/DownloaderFunctions.mjs")).default
-        DownloaderFunctions = new myDownloaderFunctions(SDA_POSTREST_URL)
-        RasterFunctions = (await import("/static/SubComponents/JsComponents/RasterFunctions.mjs")).default
-        const myDatabaseFunctions = (await import("/static/SubComponents/JsComponents/DatabaseFunctions.mjs")).default
-        DatabaseFunctions = new myDatabaseFunctions()
+    if (moduleInitPromise) {
+        return moduleInitPromise
     }
-    catch(error){
-        echo("Failed to load DownloaderFunctions: " + error)
-    }
+
+    moduleInitPromise = (async () => {
+        try{
+            BrowserStorage = (await import("/static/SubComponents/JsComponents/BrowserStorageFunctions.mjs")).default
+            SDA_POSTREST_URL =  BrowserStorage.getUrlCookie("sdaPostRestUrl")
+            osPathSep = BrowserStorage.getOsPathSep()
+
+            if (!DownloaderFunctions) {
+                const myDownloaderFunctions = (await import("/static/SubComponents/JsComponents/DownloaderFunctions.mjs")).default
+                DownloaderFunctions = new myDownloaderFunctions(SDA_POSTREST_URL)
+            }
+
+            if (!RasterFunctions) {
+                RasterFunctions = (await import("/static/SubComponents/JsComponents/RasterFunctions.mjs")).default
+            }
+
+            if (!DatabaseFunctions) {
+                const myDatabaseFunctions = (await import("/static/SubComponents/JsComponents/DatabaseFunctions.mjs")).default
+                DatabaseFunctions = new myDatabaseFunctions()
+            }
+        }
+        catch(error){
+            moduleInitPromise = null
+            echo("Failed to load DownloaderFunctions: " + error)
+            throw error
+        }
+    })()
+
+    return moduleInitPromise
 }
-initializeModules()
 //Feature flags
 const showSdvResultsFlag = false;
 const enableShapefileDownload = false;
 const enableSsaVersionCheck = true;
 
-const url = 'http://localhost:8083/SSURGOPortalUI'
-const fileCheckUrl = 'http://localhost:8083/fileExists'
+const url = '/SSURGOPortalUI'
+const fileCheckUrl = '/fileExists'
 //Database Inventory Table Constants
 const dbTableId = 'databaseTable'
 const dbTableContainer = 'dbTableContainer'
@@ -121,45 +140,49 @@ function setDatabaseNameAndPath(name, path, databasefunctions = DatabaseFunction
     databasefunctions.folderPath = folderPath
     rasterfunctions.databaseName = name
 }
+
+function sendLoggerWarning(message){
+    const encodedMessage = encodeURIComponent(String(message ?? 'Unknown warning'))
+    return fetch(`/tlogger/warning:${encodedMessage}`).catch(() => {})
+}
 /**Main function for communicating with the server*/
 async function sendData(data){
     //first we send the data for the server and wait
-    let request = data.request
+    let request = data?.request
     let returnedResponse
+    const requestTag = String(request ?? 'unknown-request')
     //Without a timeout set in code, browsers will enforce their own server request timeouts (bahavoir isn't consistent, though)
     //This code sets a timeout limit that is hopefully larger than what any process may need to complete.
     const controller = new AbortController();
     const timeoutID = setTimeout(() => controller.abort(), 200000000); //in milliseconds (~55.5 hours)
-    await fetch(url, {
-        method : 'POST',
-        headers: {'Content-Type' : 'application/json'},
-        body: JSON.stringify(data),
-        signal: controller.signal},
-    ).catch(function(err){
-        if (err.name === 'AbortError') {
-            fetch('http://localhost:8083/tlogger/warning'+'Fetch request timed out')
+
+    try {
+        const response = await fetch(url, {
+            method : 'POST',
+            headers: {'Content-Type' : 'application/json'},
+            body: JSON.stringify(data),
+            signal: controller.signal
+        })
+
+        if(!response.ok){
+            throw new Error(`HTTP error! status: ${response.status}`)
         }
-        fetch('http://localhost:8083/tlogger/warning'+err)
-        //The message in the Modal below only covers one error scenario. Other error Modals are needed.
-        $('#serverClosedModal').modal("show")
-    })
-    //then we make sure the response is in JSON and make a JSON object
-    .then(response =>response.json())
-    //Then we handle the data
-    .then(async function(response){
+
+        const responseData = await response.json()
+
         try{
             //This can probably be separated into a separate method
             if(request == databaseTableRequest){
-                databaseTable.totalRows = Object.keys(response.records).length
-                databaseTable.data = response.records
-                databaseTable.dbStatus = response.dbstatus
+                databaseTable.totalRows = Object.keys(responseData.records).length
+                databaseTable.data = responseData.records
+                databaseTable.dbStatus = responseData.dbstatus
                 DatabaseFunctions.databaseTable = databaseTable
                 RasterFunctions.databaseData = databaseTable.data
                 setDatabaseName(databasePath)
                 setDatabaseNameAndPath(databaseName, databasePath)
                 buildDatabaseTable()
                 document.getElementById('emptyDatabaseGrayIcon').setAttribute('style', 'display: none')
-                Object.keys(response.records).length > 0 ? 
+                Object.keys(responseData.records).length > 0 ? 
                     $("#importPromptMessage").text("To import more data into your database, please choose one of the options below.") :
                     $("#importPromptMessage").text("We have detected that you have selected an empty database. Please choose one of the options below to add data to your database.");
                 
@@ -169,9 +192,9 @@ async function sendData(data){
                 }
             }
             else if(request == pretestImportCandidatesRequest){
-                getTotalFolders(response.subfolders)
+                getTotalFolders(responseData.subfolders)
                 setErrorToggleDisplay()
-                importTable.data = response.subfolders
+                importTable.data = responseData.subfolders
                 if (DatabaseFunctions) {
                     DatabaseFunctions.importTable = importTable 
                     DatabaseFunctions.folderPath = folderPath
@@ -193,51 +216,51 @@ async function sendData(data){
                 setDuplicateToggleDisplay()
             }
             else if(request == createTemplateDatabaseRequest){
-                databasePath = response.path
+                databasePath = responseData.path
                 promptUsersToImport()
             }
             else if(request == copyTemplateFileRequest){
-                returnedResponse = response
+                returnedResponse = responseData
                 //Update the database tree view when creating a new database    
                 executeFolderTreeRequest(databaseTreeViewTable.tableId, rootPath, true)
             }
             else if(request == importCandidatesRequest){
-                returnedResponse = response
+                returnedResponse = responseData
             }
             else if(request == generateRastersRequest){
-                returnedResponse = response
+                returnedResponse = responseData
             }
             else if(request == deleteAreaSymbolRequest){
-                returnedResponse = response
+                returnedResponse = responseData
             }
             else if(request == bulkSSADownload){
-                returnedResponse = response
+                returnedResponse = responseData
             }
             else if (request == getTemplateCatalogRequest){
-                emptyTemplates = response.emptytemplates
+                emptyTemplates = responseData.emptytemplates
             }
             else if (request == getSDVAttributesByFolderRequest) {
-                returnedResponse = response
+                returnedResponse = responseData
             }
             else if (request == getSDVRatingOptions) {
-                returnedResponse = response
+                returnedResponse = responseData
             }
             else if (request == generateAggregationRequest){
-                returnedResponse = response
+                returnedResponse = responseData
             }
             else if (request == getFolderTreeRequest){
                 if(requestLocation == databaseTreeViewTableId){
                     //Builds out the tree view for selecting a database
                     let search = document.getElementById("databaseSearchText")
                     search.setAttribute('onchange', `executeFolderTreeRequest('${databaseTreeViewTable.tableId}', "${rootPath}", true, updatedValue('databaseSearchText'))`)
-                    databaseTreeViewTable.data = response.nodes
+                    databaseTreeViewTable.data = responseData.nodes
                     databaseTreeViewTable.populateTreeViewTable()
                 }
                 else if(requestLocation == importTreeViewTableId){
                     //Builds out the tree view to select an SSA parent folder
                     let search = document.getElementById("ssaSearchTextbox") //Set the id of the search bar.
                     search.setAttribute('onchange', `executeFolderTreeRequest('${importTreeViewTable.tableId}', "${rootPath}", false, updatedValue('ssaSearchTextbox'))`)
-                    importTreeViewTable.data = response.nodes
+                    importTreeViewTable.data = responseData.nodes
                     importTreeViewTable.populateTreeViewTable()
                     importTreeViewTable.treeViewContainsSsurgo("hasSsurgoDataMessage")
                     $("#selectSsurgoFolderFinalizeBtn").on("click", () => {ImportActivities.selectSSAParentFolder(rootPath)})
@@ -246,30 +269,45 @@ async function sendData(data){
                     //Builds out the tree view to select a download folder
                     let search = document.getElementById("downloadSearchTextbox") //Set the id of the search bar.
                     search.setAttribute('onchange', `executeFolderTreeRequest('${downloadTreeViewTable.tableId}', "${rootPath}", false, updatedValue('downloadSearchTextbox'))`)
-                    downloadTreeViewTable.data = response.nodes
+                    downloadTreeViewTable.data = responseData.nodes
                     downloadTreeViewTable.populateTreeViewTable()
                     downloadTreeViewTable.treeViewContainsSsurgo("hasSsurgoDataMessage")
                 }
             }
-            else if (request = 'getstatus'){
-                echo(response)
+            else if (request == 'getstatus'){
+                echo(responseData)
             }
             else(
-                console.log("Unknown request: " + response.request.request)
+                console.log("Unknown request: " + responseData.request.request)
             )
         }
         catch(error){
             echo(error)
-            logJavaScriptError(error.stack)
+            logJavaScriptError(error?.stack ?? String(error))
         }
-        // Need to implement logic here to dictate if a dbtable is being created or a folder table is being created
-        //buildTable(data.databaseItems, 'databaseTable')
-    })//TODO: This would be a great place to implement error handling and present a message to the users
-    //If we are expecting to return an item, return it.
-    if(returnedResponse != null){
-        return(returnedResponse)
+
+        //If we are expecting to return an item, return it.
+        if(returnedResponse != null){
+            return(returnedResponse)
+        }
+
+        return responseData
     }
-    clearTimeout(timeoutID)
+    catch(err){
+        if (err?.name === 'AbortError') {
+            sendLoggerWarning(`sendData timed out for ${requestTag}`)
+        }
+        else{
+            const warningMessage = String(err?.message ?? err)
+            sendLoggerWarning(`sendData failed for ${requestTag} - ${warningMessage}`)
+        }
+        //The message in the Modal below only covers one error scenario. Other error Modals are needed.
+        $('#serverClosedModal').modal("show")
+        return null
+    }
+    finally{
+        clearTimeout(timeoutID)
+    }
 }
 
 
@@ -572,7 +610,7 @@ class CheckboxTable extends Table {
             this.populateOutdatedSsaMessage()
         } else {
             this.oudatedSsaToggle.setAttribute('style', 'display: none')
-        }
+            else if (request == 'getstatus'){
 
         if(discrepencies && discrepencies.missingOnServer.length > 0){
             this.nonExistingSSAs = discrepencies.missingOnServer
@@ -581,16 +619,31 @@ class CheckboxTable extends Table {
         } else {
             this.nonExistingSsaToggle.setAttribute('style', 'display: none')
         }
-    }
+            logJavaScriptError(error?.stack || String(error))
 
-    setOutdatedSsaDisplay() {
-        if(this.outdatedSSAs.length > 0){
-            this.oudatedSsaToggle.removeAttribute('style')
+        // Need to implement logic here to dictate if a dbtable is being created or a folder table is being created
+        //buildTable(data.databaseItems, 'databaseTable')
+
+        //If we are expecting to return an item, return it.
+        if(returnedResponse != null){
+            return(returnedResponse)
         }
-        else{
-            this.oudatedSsaToggle.setAttribute('style', 'display: none')
+
+        return response
+    }
+    catch(err){
+        const requestLabel = String(request ?? 'unknown-request')
+        if (err?.name === 'AbortError') {
+            sendLoggerWarning(`sendData timeout for request ${requestLabel}`)
         }
-    
+        sendLoggerWarning(`sendData failure for request ${requestLabel}: ${String(err?.message ?? err)}`)
+        //The message in the Modal below only covers one error scenario. Other error Modals are needed.
+        $('#serverClosedModal').modal("show")
+        return null
+    }
+    finally {
+        clearTimeout(timeoutID)
+        }
         if(this.outdatedSsaInfoText.lastChild && this.outdatedSsaInfoText.lastChild.tagName == "P"){
             this.outdatedSsaInfoText.lastElementChild.remove()
         }
@@ -901,6 +954,33 @@ async function landingPageInitializeTreeView(isCreate){
     document.getElementById("ssaselector").addEventListener("onssadelete", DownloaderFunctions.ssaDelete);
 }
 
+function normalizeUiPath(path){
+    return String(path ?? '').trim().replaceAll('\\', '/')
+}
+
+function isDriveRootUiPath(path){
+    return /^[A-Za-z]:\/?$/.test(path)
+}
+
+async function getDefaultDownloadFolderPath(){
+    try{
+        const response = await fetch('/defaultDownloadFolder', {method: 'GET'})
+        if(!response.ok){
+            return undefined
+        }
+
+        const payload = await response.json()
+        if(payload?.success && typeof payload.path == 'string'){
+            return normalizeUiPath(payload.path)
+        }
+    }
+    catch(error){
+        echo(`Unable to resolve default download folder: ${error?.message ?? error}`)
+    }
+
+    return undefined
+}
+
 function navigateBackToLandingPage(focusElementId){
     $('#homePageContainer').show()
     $('#helpPaneContainer, #landingPageContainer, #downloadPageContainer').hide()
@@ -914,18 +994,44 @@ function displayLandingPage(){
 
 /**Check if cookie exists, otherwise set default value. Then send request to the python server.*/
 async function initializeTreeView(request, cookie){
-    let path = BrowserStorage.getLocalStorage(cookie)
-    let pathCheck = await doesPathExist(path)
-    if(path != undefined && pathCheck["failedfolders"].length ==0){
-        path = BrowserStorage.getLocalStorage(cookie)
+    const isDownloadTreeRequest = request == downloadTreeViewTableId
+    let path = normalizeUiPath(BrowserStorage.getLocalStorage(cookie))
+    let pathCheck = undefined
+
+    if(path){
+        pathCheck = await doesPathExist(path)
     }
-    //Set default location based on OS
+
+    const pathExists = Boolean(
+        path
+        && pathCheck
+        && Array.isArray(pathCheck.failedfolders)
+        && pathCheck.failedfolders.length == 0
+    )
+
+    if(pathExists && !(isDownloadTreeRequest && isDriveRootUiPath(path))){
+        path = normalizeUiPath(BrowserStorage.getLocalStorage(cookie))
+    }
+    else if(isDownloadTreeRequest){
+        const defaultDownloadPath = await getDefaultDownloadFolderPath()
+        if(defaultDownloadPath){
+            path = defaultDownloadPath
+            BrowserStorage.setLocalStorage(cookie, defaultDownloadPath)
+        }
+        else if(osPathSep == "\\"){
+            path = 'C:/'
+        }
+        else{
+            path = "/"
+        }
+    }
     else if(osPathSep == "\\"){
-        path = 'C:\\'
+        path = 'C:/'
     }
     else{
         path = "/"
     }
+
     requestLocation = request
     rootPath = path.replaceAll('\\', '/')
     rootPath = rootPath.replaceAll ('//', '/')
@@ -979,7 +1085,11 @@ async function continuePathNavigation(request, path, showfiles, folderPattern, t
     if(pathCheck["failedfolders"].length != 0){
         let oldPathCheck = await doesPathExist(parentPath)
         if(oldPathCheck["failedfolders"].length != 0){
-            if(osPathSep == "\\"){
+            if(request == downloadTreeViewTableId){
+                const defaultDownloadPath = await getDefaultDownloadFolderPath()
+                parentPath = defaultDownloadPath ? defaultDownloadPath : 'C:/'
+            }
+            else if(osPathSep == "\\"){
                 parentPath = 'C:/'
             }
             else{
@@ -987,7 +1097,18 @@ async function continuePathNavigation(request, path, showfiles, folderPattern, t
             }
         }
         if(toggleWarnings){
-            request == databaseTreeViewTableId ? databaseTextBox.value = databaseTextBox.oldvalue : ssaTextBox.value = ssaTextBox.oldvalue
+            const databaseTextBox = document.getElementById('databaseTextBox')
+            const ssaTextBox = document.getElementById('ssaTextBox')
+            const downloadTextBox = document.getElementById('downloadTextBox')
+            if(request == databaseTreeViewTableId && databaseTextBox){
+                databaseTextBox.value = databaseTextBox.oldvalue
+            }
+            else if(request == importTreeViewTableId && ssaTextBox){
+                ssaTextBox.value = ssaTextBox.oldvalue
+            }
+            else if(request == downloadTreeViewTableId && downloadTextBox){
+                downloadTextBox.value = downloadTextBox.oldvalue
+            }
             document.getElementById('missingObjectModalBtn').click()
             document.getElementById('closeMissingObjectModal').setAttribute('onclick', `executeFolderTreeRequest('${request}', '${parentPath}', ${showfiles}, '${folderPattern}', true)`)
             document.getElementById('closeMissingObjectModalBtn').setAttribute('onclick', `executeFolderTreeRequest('${request}', '${parentPath}', ${showfiles}, '${folderPattern}', true)`)
@@ -1094,24 +1215,45 @@ function updatedValue(elementId){
 
 /**Checks the file system to see if a folder or file exists. Returns a boolean */
 async function doesPathExist(path){
+    const requestedPaths = Array.isArray(path) ? path : [path]
+    const normalizedPaths = requestedPaths
+        .filter((value) => typeof value == 'string')
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0)
+
+    if(normalizedPaths.length == 0){
+        return {"failedfolders": []}
+    }
+
     try{
-        if(path.constructor !== Array){
-            path = new Array(path)
-        }
-        return fetch(fileCheckUrl, {
+        const response = await fetch(fileCheckUrl, {
             method : 'POST',
             headers: {'Content-Type' : 'application/json'},
-            body: JSON.stringify(path)}
-        ).then(response => response.json()
-        ).then(function(response){return response})
+            body: JSON.stringify(normalizedPaths),
+        })
+
+        if(!response.ok){
+            $('#serverClosedModal').modal("show")
+            return {"failedfolders": normalizedPaths}
+        }
+
+        const payload = await response.json()
+        if(!payload || !Array.isArray(payload.failedfolders)){
+            return {"failedfolders": normalizedPaths}
+        }
+
+        return payload
     }
     catch(e){
         if(e instanceof TypeError){
-            return undefined
+            echo("Unable to connect to server.")
+            $('#serverClosedModal').modal("show")
         }
         else{
-            echo(e.message)
+            echo(e?.message ?? e)
         }
+
+        return {"failedfolders": normalizedPaths}
     }
 }
 
@@ -1156,6 +1298,61 @@ async function selectDownloadParentFolder(path) {
     document.getElementById('selectedDownloadFolderName').value = path;
 }
 
+async function createDownloadFolderInCurrentPath(){
+    const downloadTextBox = document.getElementById('downloadTextBox')
+    const currentPath = normalizeUiPath(rootPath || downloadTextBox?.value)
+
+    if(!currentPath){
+        alert('Select a parent folder before creating a new folder.')
+        return
+    }
+
+    const rawFolderName = window.prompt('Enter a name for the new folder:')
+    if(rawFolderName === null){
+        return
+    }
+
+    const folderName = String(rawFolderName).trim()
+    if(!folderName){
+        alert('Folder name cannot be empty.')
+        return
+    }
+
+    try{
+        const response = await fetch('/createDownloadFolder', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({parent: currentPath, folderName: folderName}),
+        })
+
+        if(!response.ok){
+            alert(`Unable to create folder (${response.status}).`)
+            return
+        }
+
+        const payload = await response.json()
+        if(!payload?.success || typeof payload.path != 'string'){
+            alert(payload?.message ?? 'Unable to create folder.')
+            return
+        }
+
+        const createdPath = normalizeUiPath(payload.path)
+        if(BrowserStorage){
+            BrowserStorage.setLocalStorage('downloadpath', createdPath)
+        }
+
+        await executeFolderTreeRequest(downloadTreeViewTable.tableId, createdPath, false)
+
+        if(downloadTextBox){
+            downloadTextBox.value = createdPath
+            downloadTextBox.oldvalue = createdPath
+        }
+    }
+    catch(error){
+        alert(`Unable to create folder: ${error?.message ?? error}`)
+    }
+}
+
     /**This class contains all of the import related activities.
      * TODO: Gather all of the import related activities, place it within this class, and put the class in a separate file.
      */
@@ -1164,10 +1361,30 @@ class ImportActivities{
 
     static async checkDataFreshness(records){
         const sdaService = await import("sdaService");
-        const localRecords = Object.entries(records).map(([key, value]) => {                       
-            value['areaSymbol'] = key;            
-            return value;            
-        });     
+
+        let localRecords = []
+        if (Array.isArray(records)) {
+            localRecords = records
+                .filter((record) => record && typeof record === 'object')
+                .map((record) => {
+                    const areaSymbol = record.areaSymbol ?? record.areasymbol ?? record.AREASYMBOL
+                    return areaSymbol ? { ...record, areaSymbol } : null
+                })
+                .filter((record) => record !== null)
+        }
+        else if (records && typeof records === 'object') {
+            localRecords = Object.entries(records)
+                .map(([key, value]) => {
+                    if (!value || typeof value !== 'object') {
+                        return null
+                    }
+
+                    const areaSymbol = value.areaSymbol ?? value.areasymbol ?? value.AREASYMBOL ?? key
+                    return areaSymbol ? { ...value, areaSymbol } : null
+                })
+                .filter((record) => record !== null)
+        }
+
         return await sdaService.checkSurveyAreas(localRecords, SDA_POSTREST_URL);
     }
 
@@ -2170,10 +2387,19 @@ async function getDatabaseTemplateCatalog() {
 }
 
 /**Iterate through the template config options stored in 'emptyTemplates' & populate Database Type Dropdown menu*/
-function populateDatabaseTypeDropdown(){
+async function populateDatabaseTypeDropdown(){
     var showTextTemplates = document.getElementById('textTemplatesCheckbox').checked
     var templateOptions = document.getElementById('templateTypeDropdown')
     templateOptions.innerHTML = ""
+    if (!emptyTemplates || Object.keys(emptyTemplates).length === 0) {
+        await getDatabaseTemplateCatalog()
+    }
+    if (!emptyTemplates || Object.keys(emptyTemplates).length === 0) {
+        let errorMessageElement = document.getElementById("createNewDatabaseErrorMessage")
+        errorMessageElement.textContent = "Unable to load database templates. Please try again."
+        errorMessageElement.classList.remove("hidden")
+        return
+    }
     for (let template in emptyTemplates)
     {
         const option = document.createElement('option')
@@ -2198,6 +2424,32 @@ function populateDatabaseTypeDropdown(){
     displayNewDatabasePath();
 }
 
+function normalizeDirectoryForDatabaseCreation(pathValue) {
+    let normalizedPath = String(pathValue ?? '').trim().replaceAll('\\', '/')
+    if (!normalizedPath) {
+        return ''
+    }
+
+    normalizedPath = normalizedPath.replace(/\/+$/, '')
+
+    // If the user selected an existing DB file, create new DB beside it (in parent folder).
+    const configuredExtensions = emptyTemplates && typeof emptyTemplates === 'object'
+        ? Object.values(emptyTemplates)
+            .map(template => String(template?.suffix ?? '').toLowerCase())
+            .filter(suffix => suffix.startsWith('.'))
+        : []
+    const knownDbSuffixes = new Set(['.gpkg', '.sqlite', ...configuredExtensions])
+
+    const lowerPath = normalizedPath.toLowerCase()
+    const isDatabaseFilePath = Array.from(knownDbSuffixes).some(suffix => lowerPath.endsWith(suffix))
+    if (!isDatabaseFilePath) {
+        return normalizedPath
+    }
+
+    const parentPath = normalizedPath.split('/').slice(0, -1).join('/')
+    return parentPath || normalizedPath
+}
+
 /**Issue a check against various different criteria to determine if a user should be allowed to click the save button.
  * Depending on these checks, the UI will be updated to warn and disable or allow saving. */
 async function allowUserSaveDatabase(databaseRootPath, databaseDisplayPath){
@@ -2207,8 +2459,9 @@ async function allowUserSaveDatabase(databaseRootPath, databaseDisplayPath){
     let createNewDatabaseName = document.getElementById('createNewDatabaseName').value
     let folderContents
     //Check to see if the folder we are in ends with "_gpkg" or "_sqlite". If true, do not allow the user to save
-    let inDatabaseFolder = databaseRootPath.split("\\").slice(-2, -1).toString()
+    let inDatabaseFolder = databaseRootPath.split(/[\\/]+/).slice(-2, -1).toString()
     inDatabaseFolder = inDatabaseFolder.includes("_gpkg") || inDatabaseFolder.includes("_sqlite")
+    let folderHasContents = false
     //If we are in a _gpkg or _sqlite folder or if the database name is blank, we do not need to send other checks. 
     if(!inDatabaseFolder || createNewDatabaseName == ""){
         var goodPath = await continuePathNavigation(databaseTreeViewTableId, databaseRootPath.split(/[\/\\]+/).slice(0, -1).join("/"), false, "", true)
@@ -2223,9 +2476,13 @@ async function allowUserSaveDatabase(databaseRootPath, databaseDisplayPath){
             body: JSON.stringify(folderContentsRequest)}
         ).then(response => response.json()
         ).then(function(response){return response})
+
+        folderHasContents = Array.isArray(folderContents?.nodes)
+            ? folderContents.nodes.length > 0
+            : Boolean(folderContents?.nodes)
     }
     preventDbCreationContainer.setAttribute('style', 'display: none') //Reset hide display preventDbCreationContainer
-    if(inDatabaseFolder || createNewDatabaseName == "" || !goodPath || folderContents.nodes ) { //Database already exists or folder contains data
+    if(inDatabaseFolder || createNewDatabaseName == "" || !goodPath || folderHasContents ) { //Database already exists or folder contains data
         createNewDatabaseLocation.innerHTML = databaseDisplayPath;
         createNewDatabaseLocation.setAttribute('style', 'color: #E90000; font-weight: bold;') //Change text to red & bold to pass 508
         preventDbCreationContainer.setAttribute('style', 'display: block') //Display preventDbCreationContainer
@@ -2235,7 +2492,7 @@ async function allowUserSaveDatabase(databaseRootPath, databaseDisplayPath){
         createNewDatabaseLocation.setAttribute('style', 'color: #000000; font-weight: normal;') //Change text to black
     }
     //Disable "Save Button" the database name is empty, the database already exists, or the folder contains other data
-    if(inDatabaseFolder || createNewDatabaseName == "" || !goodPath || folderContents.nodes != undefined){
+    if(inDatabaseFolder || createNewDatabaseName == "" || !goodPath || folderHasContents){
         createNewDbBtn.disabled = true
         return false
     }
@@ -2269,6 +2526,13 @@ async function displayNewDatabasePath() {
             extension = emptyTemplates[selectedTemplate].suffix;
         }
     }
+    userDirectory = normalizeDirectoryForDatabaseCreation(userDirectory)
+
+    const databasePathInput = document.getElementById('databaseTextBox')
+    if (databasePathInput) {
+        databasePathInput.value = userDirectory.replaceAll('/', osPathSep)
+    }
+
     //Standardize the file path presented
     userDirectory = userDirectory.split("/")
     userDirectory = userDirectory.join(osPathSep)
@@ -2294,8 +2558,11 @@ async function createNewTemplateDatabase(template, destinationFolder, dbName, ov
     let extension = emptyTemplates[selectedTemplate].suffix;
     let folderPathSuffix = extension.replaceAll(".", "_")
     let dbNameValue = document.getElementById(dbName).value;
-    let destinationFolderValue = `${document.getElementById(destinationFolder).value}/${dbNameValue}${folderPathSuffix}`;
+    let destinationRootValue = normalizeDirectoryForDatabaseCreation(document.getElementById(destinationFolder).value)
+    let destinationFolderValue = `${destinationRootValue}/${dbNameValue}${folderPathSuffix}`;
     let errorMessageElement = document.getElementById("createNewDatabaseErrorMessage")
+
+    document.getElementById(destinationFolder).value = destinationRootValue.replaceAll('/', osPathSep)
 
     destinationFolderValue = destinationFolderValue.replaceAll("\\", "/") //Send folder path using / to prevent errors on the python side
     databasePath = destinationFolderValue + "/" + dbNameValue + extension; //set the global databasePath variable
@@ -3584,7 +3851,7 @@ function finishLoading(){
         // The pagehide has not been thoroughly tested on my end however
         //The sendBeacon seems to work even after being idle for extended periods of time.
 window.addEventListener('pagehide', function(){
-    navigator.sendBeacon('http://localhost:8083/close')
+    navigator.sendBeacon('/close')
 })
 
 //Send any unhandled errors to the log file. NOTE: STACK IS NONSTANDARD and should only be used as a last resort.
@@ -3603,20 +3870,136 @@ window.onbeforeunload = function(){
     return "Are you sure you want to leave this page?"
 }
 
+async function getLocalVersionInfo() {
+    const getCookieValue = (name) => {
+        if (BrowserStorage && typeof BrowserStorage.getCookie === 'function') {
+            return BrowserStorage.getCookie(name)
+        }
+
+        const cookiePrefix = `${name}=`
+        const cookieItem = document.cookie
+            .split(';')
+            .map((part) => part.trim())
+            .find((part) => part.startsWith(cookiePrefix))
+
+        return cookieItem ? decodeURIComponent(cookieItem.slice(cookiePrefix.length)) : ''
+    }
+
+    const versionInfo = {
+        ApplicationVersion: getCookieValue("ApplicationVersion"),
+        SQLiteSSURGOTemplateVersion: getCookieValue("SQLiteSSURGOTemplateVersion"),
+        SSURGOVersion: getCookieValue("SSURGOVersion")
+    }
+
+    try {
+        const localVersionResponse = await fetch('/getVersionInfoLocal', { cache: 'no-store' })
+        if (localVersionResponse.ok) {
+            const localVersionInfo = await localVersionResponse.json()
+            if (localVersionInfo && typeof localVersionInfo === 'object') {
+                versionInfo.ApplicationVersion = localVersionInfo.ApplicationVersion ?? versionInfo.ApplicationVersion
+                versionInfo.SQLiteSSURGOTemplateVersion = localVersionInfo.SQLiteSSURGOTemplateVersion ?? versionInfo.SQLiteSSURGOTemplateVersion
+                versionInfo.SSURGOVersion = localVersionInfo.SSURGOVersion ?? versionInfo.SSURGOVersion
+            }
+        }
+    } catch (err) {
+        fetch('/tlogger/warning:Unable%20to%20fetch%20local%20version%20info')
+    }
+
+    return versionInfo
+}
+
+function compareDottedVersions(currentVersion, latestVersion) {
+    const parseParts = (versionText) => String(versionText)
+        .trim()
+        .split('.')
+        .map(part => {
+            const parsed = Number.parseInt(part, 10)
+            return Number.isNaN(parsed) ? 0 : parsed
+        })
+
+    const currentParts = parseParts(currentVersion)
+    const latestParts = parseParts(latestVersion)
+    const maxLen = Math.max(currentParts.length, latestParts.length)
+
+    for (let i = 0; i < maxLen; i++) {
+        const currentPart = currentParts[i] ?? 0
+        const latestPart = latestParts[i] ?? 0
+        if (currentPart < latestPart) return -1
+        if (currentPart > latestPart) return 1
+    }
+
+    return 0
+}
+
+async function checkForPortalUpdate(curVersion) {
+    let versionToCheck = curVersion
+    if (versionToCheck === '0.0.0.0') {
+        fetch('/tlogger/debug:Test%20Version%20Detected')
+        return
+    }
+    if (!versionToCheck || versionToCheck === 'unknown') {
+        fetch('/tlogger/warning:Version%20is%20Not%20Set')
+        return
+    }
+    if (navigator.onLine === false) {
+        fetch('/tlogger/warning:No%20Internet%20Connection')
+        return
+    }
+
+    let newestVersion = ''
+    try {
+        const newestVersionResponse = await fetch('/getVersion')
+        newestVersion = (await newestVersionResponse.text()).trim()
+    } catch (error) {
+        fetch('/tlogger/warning:Unable%20to%20check%20for%20updates')
+        return
+    }
+
+    if (!newestVersion || newestVersion.startsWith('Error')) {
+        let errorMsg = 'warning:' + newestVersion.replaceAll(' ','%20')
+        fetch('/tlogger/' + errorMsg)
+        return
+    }
+
+    const versionCompare = compareDottedVersions(versionToCheck, newestVersion)
+    if (versionCompare >= 0) {
+        fetch('/tlogger/info:SSURGO%20Portal%20is%20up%20to%20date')
+        return
+    }
+
+    let modalBody = document.getElementById("versionCheckModalMessage")
+    modalBody.innerText = "SSURGO Portal " + newestVersion + " is available. (You have " + versionToCheck + ".)"
+    let downloadButton = document.getElementById("downloadButton")
+    downloadButton.innerText = "Download v" + newestVersion
+    document.getElementById('versionCheckModalBtn').click()
+}
+
 //When the webpage first loads, check to see if the server is running. Then issue a request to populate the tree view under the create database tab
 window.onload = async function(){
-    await fetch(
-        "http://localhost:8083/serverStatus", {method: 'HEAD'}
-    ).then(response => {
-        if(!response.ok){
-            $('#serverClosedModal').modal("show")
-        }}
-    ).catch(function(){
-        $('#serverClosedModal').modal("show")
+    const initialVersionInfo = await getLocalVersionInfo()
+    window.portalVersionInfo = initialVersionInfo
+    const initialVersion = initialVersionInfo.ApplicationVersion || 'unknown'
+    Array.from(document.getElementsByClassName("versionNumText")).forEach((el) => {
+        el.innerText = "v" + initialVersion
     })
-    await checkInternetConnection();
-    RasterFunctions.setupListeners()
-    DatabaseFunctions.setupListeners();
+
+    try {
+        await initializeModules();
+        await fetch(
+            "/serverStatus", {method: 'HEAD'}
+        ).then(response => {
+            if(!response.ok){
+                $('#serverClosedModal').modal("show")
+            }}
+        ).catch(function(){
+            $('#serverClosedModal').modal("show")
+        })
+        checkInternetConnection().catch(() => false)
+        if (!RasterFunctions || !DatabaseFunctions || !DownloaderFunctions) {
+            throw new Error('Startup modules failed to initialize')
+        }
+        RasterFunctions.setupListeners()
+        DatabaseFunctions.setupListeners();
 
     // a quick POC that won't run because mapIt is already defined inside of the myDownloaderFunctions
     // the following lines can be commented out for a quick test
@@ -3628,92 +4011,37 @@ window.onload = async function(){
     //mapIt2.shapefileFeatureGroup = Math.random().toString(10)
     //mapIt2.shapefileFeatureGroup = Math.random().toString(15)
   //TODO: This will have to be further looked in the scenario where sapoly.geojson is not immediately accessible
-    DownloaderFunctions.setupDownloader()
+    await DownloaderFunctions.setupDownloader()
 
     await getDatabaseTemplateCatalog()
-    //If ApplicationVersion is set, then plan to do the test of current vs newest
-    let verTest = true
-    let curVersion = BrowserStorage.getCookie("ApplicationVersion")
-    if(BrowserStorage.cookieExists("ApplicationVersion")){
-        if (curVersion === '0.0.0.0') {
-            fetch('http://localhost:8083/tlogger/debug:Test%20Version%20Detected')
-            verTest = false
-        }
-    } else {
+    const portalVersionInfo = window.portalVersionInfo || await getLocalVersionInfo()
+
+    window.portalVersionInfo = portalVersionInfo
+    let curVersion = portalVersionInfo.ApplicationVersion
+
+    if (curVersion === '0.0.0.0') {
+        fetch('/tlogger/debug:Test%20Version%20Detected')
         verTest = false
-        fetch('http://localhost:8083/tlogger/warning:Version%20Cookie%20Not%20Set')
+    }
+    if (!curVersion) {
+        curVersion = 'unknown'
     }
 
     //Set the version number for every element that is expecting updates
     let versionTexts = document.getElementsByClassName("versionNumText")
-    for(let el in versionTexts){
-        versionTexts[el].innerText = "v" + curVersion
+    Array.from(versionTexts).forEach((el) => {
+        el.innerText = "v" + curVersion
+    })
+
+    checkForPortalUpdate(curVersion).catch(() => {
+        fetch('/tlogger/warning:Unable%20to%20complete%20version%20check')
+    })
+    } catch (error) {
+        console.error("Startup initialization failed", error)
+        fetch('/tlogger/warning:Startup%20initialization%20failed').catch(() => {})
+    } finally {
+        finishLoading()
     }
-
-    //test if there is internet connectivity
-    if(navigator.onLine === false) {
-        verTest = false
-        fetch('http://localhost:8083/tlogger/warning:No%20Internet%20Connection')
-    }
-    let newestVersion
-    const compareDottedVersions = (currentVersion, latestVersion) => {
-        const parseParts = (versionText) => String(versionText)
-            .trim()
-            .split('.')
-            .map(part => {
-                const parsed = Number.parseInt(part, 10)
-                return Number.isNaN(parsed) ? 0 : parsed
-            })
-
-        const currentParts = parseParts(currentVersion)
-        const latestParts = parseParts(latestVersion)
-        const maxLen = Math.max(currentParts.length, latestParts.length)
-
-        for (let i = 0; i < maxLen; i++) {
-            const currentPart = currentParts[i] ?? 0
-            const latestPart = latestParts[i] ?? 0
-            if (currentPart < latestPart) return -1
-            if (currentPart > latestPart) return 1
-        }
-
-        return 0
-    }
-
-    //Proceed if the Browser has internet access and the curVersion cookie is set
-    if (verTest) {
-        //Attempt to get the most recent SSURGO Portal version number
-        await fetch('http://localhost:8083/getVersion')
-            .then(response => response.text())
-            .then(data => {
-                newestVersion = data.trim()
-                //in /getVersion in webpage.py, there are two error scenarios that return a string that begins with 'Error'
-                if (newestVersion.startsWith('Error')) {
-                    verTest = false
-                    let errorMsg = 'warning:' + newestVersion.replace(' ','%20')
-                    fetch('http://localhost:8083/tlogger/'+errorMsg)
-                }
-        })
-        //Proceed if most recent SSURGO Portal version number was retreived
-        if (verTest === true) {
-            const versionCompare = compareDottedVersions(curVersion, newestVersion)
-            if (versionCompare >= 0) {
-                fetch('http://localhost:8083/tlogger/info:SSURGO%20Portal%20is%20up%20to%20date')
-                //console.log("SSURGO Portal is up to date") //diag stmt. TODO: output to log file instead.
-            } else {
-                await fetch('http://localhost:8083/SSURGOPortalURL')
-                    .then(response => response.text())
-                    //.then(data => {
-                    //    var SSURGOPortalURL = data.trim()
-                    //})
-                let modalBody = document.getElementById("versionCheckModalMessage")
-                modalBody.innerText = "SSURGO Portal " + newestVersion + " is available. (You have " + curVersion + ".)"
-                let downloadButton = document.getElementById("downloadButton")
-                downloadButton.innerText = "Download v" + newestVersion
-                document.getElementById('versionCheckModalBtn').click()
-            }
-        }
-    }
-    finishLoading()
 }
 
 
@@ -3756,7 +4084,7 @@ async function toggleContactUs() {
     let logFileLocation = document.getElementById('logFileLocation')
     // send request out to get the log file location. Only do this the first opening.
     if (logFileLocation.innerText == ""){
-        await fetch("http://localhost:8083/logFile", {
+        await fetch("/logFile", {
             method : 'GET'
         }).then((response) => response.text())
         .then(function(text){
@@ -3796,9 +4124,10 @@ function toggleHelpPaneContent(elementId) {
     let toggledContent = document.getElementById(elementId)
     toggledContent.setAttribute('style', 'display: block')
 
-    document.getElementById("applicationVersion").innerHTML = BrowserStorage.getCookie("ApplicationVersion")
-    document.getElementById("sqliteSSURGOTemplateVersion").innerHTML = BrowserStorage.getCookie("SQLiteSSURGOTemplateVersion")
-    document.getElementById("ssurgoVersion").innerHTML = BrowserStorage.getCookie("SSURGOVersion")
+    const versionInfo = window.portalVersionInfo || {}
+    document.getElementById("applicationVersion").innerHTML = versionInfo.ApplicationVersion || BrowserStorage.getCookie("ApplicationVersion")
+    document.getElementById("sqliteSSURGOTemplateVersion").innerHTML = versionInfo.SQLiteSSURGOTemplateVersion || BrowserStorage.getCookie("SQLiteSSURGOTemplateVersion")
+    document.getElementById("ssurgoVersion").innerHTML = versionInfo.SSURGOVersion || BrowserStorage.getCookie("SSURGOVersion")
 }
 
 $("#limitFolderNavigation").on("change", function(e){
@@ -3935,7 +4264,9 @@ Array.from(document.getElementsByClassName("downloadFromWebBtn")).forEach(el => 
         //If the help menu is set to the expanded view, collapse it
         $("#expandHelpMenu").click()
     }
-    DownloaderFunctions.mapIt._map.invalidateSize()
+    if (DownloaderFunctions?.mapIt?._map) {
+        DownloaderFunctions.mapIt._map.invalidateSize()
+    }
     $('#downloadPageBackBtn').focus()
 }))
 
@@ -3993,7 +4324,9 @@ $("#selectedDownloadFolderNameBrowseBtn").click(function(){
 
 // Handles "Go Back" functionality from SSA Downloads page
 $("#selectDownloadPage").click(function(){
-    DownloaderFunctions.mapIt._map.invalidateSize(true); // refresh map size
+    if (DownloaderFunctions?.mapIt?._map) {
+        DownloaderFunctions.mapIt._map.invalidateSize(true); // refresh map size
+    }
 })
 
 
@@ -4006,7 +4339,9 @@ $("#selectDownloadPageBackBtn").click(function(){
         $("#expandHelpMenu").click()
     }
     $("#downloadPageBackBtn").focus()
-    DownloaderFunctions.mapIt._map.invalidateSize(true); // refresh map size
+    if (DownloaderFunctions?.mapIt?._map) {
+        DownloaderFunctions.mapIt._map.invalidateSize(true); // refresh map size
+    }
 })
 
 //Toggle to close the Progress Modal by clicking the 'Next' Button
@@ -4093,7 +4428,7 @@ async function checkInternetConnection(isButton = false){
             //This prevents the alert from displaying on first load and requires the user to click a button.
             alert("Unable to contact download servers")
         }
-        fetch('http://localhost:8083/tlogger/warning:'+'Host%20unable%20to%20talk%20to%20WSS')
+        fetch('/tlogger/warning:'+'Host%20unable%20to%20talk%20to%20WSS')
         return false
     }
 
@@ -4102,15 +4437,28 @@ async function checkInternetConnection(isButton = false){
         $("#downloadMapContainer, #internetDownloadContainer, #downloadOptions, #downloadPageContainer>.subpage-display--footer").hide()
     }
 
+    async function sapolyExists(){
+        const headResult = await fetch('/static/sapoly.geojson', { method: 'HEAD' })
+            .then((response) => response.ok)
+            .catch(() => false)
+
+        if(headResult){
+            return true
+        }
+
+        return fetch('/static/sapoly.geojson')
+            .then((response) => response.ok)
+            .catch(() => false)
+    }
+
     try{
-        let geojsonFound = await fetch('http://localhost:8083/static/sapoly.geojson').then(
-            (response) => {return response.ok}).catch(()=>{return false})
+        let geojsonFound = await sapolyExists()
 
         if(!geojsonFound){
             displayNoSapoly()
             return false
         }
-        var test = await fetch('http://localhost:8083/checkInternet', {method:'GET'})
+        var test = await fetch('/checkInternet', {method:'GET'})
         .then((response) => response.json())
         .then(function(response){
             echo(response)
@@ -4119,9 +4467,11 @@ async function checkInternetConnection(isButton = false){
                 //loadExternalResources()
                 $("#noInternetConnectionContainer").hide()
                 $("#selectDatabaseContainer, #selectFolderContainer, #downloadOptions, #downloadMapContainer, #downloadPageContainer>.subpage-display--footer").show()
-                fetch('http://localhost:8083/tlogger/debug:'+'Host can talk to WSS')
-                DownloaderFunctions.SSAGrp = L.featureGroup().addTo(DownloaderFunctions.mapIt._map);
-                DownloaderFunctions.mapIt._map.invalidateSize()
+                fetch('/tlogger/debug:'+'Host can talk to WSS')
+                if (DownloaderFunctions?.mapIt?._map) {
+                    DownloaderFunctions.SSAGrp = L.featureGroup().addTo(DownloaderFunctions.mapIt._map);
+                    DownloaderFunctions.mapIt._map.invalidateSize()
+                }
                 return true
             }
             else{
@@ -4138,7 +4488,9 @@ $(window).on("resize", function(){
     /**An issue occurs in the map where the map tiles do not load if the window size changes. This addresses that issue.
      * TODO: This should also be implemented in the map-component.
      */
-    DownloaderFunctions.mapIt._map.invalidateSize()
+    if (DownloaderFunctions?.mapIt?._map) {
+        DownloaderFunctions.mapIt._map.invalidateSize()
+    }
 })
 
 /**Convert date object, returned by the Data Loader, into a MM/DD/YYYY format.*/

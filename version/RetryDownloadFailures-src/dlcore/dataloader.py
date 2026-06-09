@@ -10,7 +10,6 @@ import os
 # hardcoded fix below for local dev.  Consider consolidating with gdal env logic found inside def checkEmptyShapefiles
 #os.environ["PROJ_LIB"] = r"C:\Program Files\ArcGIS\Pro\Resources\pedata\gdaldata"
 
-import subprocess
 import time
 import json
 try:
@@ -68,6 +67,15 @@ def intersectingZones(debug = None):
     return (proj_zones)
 
 class dataloader:
+
+    @staticmethod
+    def _shouldSkipAutoDiscoveredFolder(name: str) -> bool:
+        """Return True when a child folder is clearly not an import candidate."""
+        if not name:
+            return True
+
+        # Hidden and metadata folders from user home/profile roots should not be pretest candidates.
+        return name.startswith('.') or name.startswith('__')
 
     @staticmethod
     def setcsvfieldsizelimit():
@@ -246,22 +254,43 @@ class dataloader:
                     if proj_lib is not None:
                         useExisting = True  #flag re: should code try to use proj.db defined by PROJ_LIB
 
-                        #GDAL wheel file appears to install library locally,
-                        #so this should be C:\User\[username]\AppData\Roaming\Python\PythonXXX\site-packages
-                        gdal_path = subprocess.check_output(['pip','show','gdal']).decode('utf-8')
-                        gdal_path = [line.split(': ')[1].strip() for line in gdal_path.split('\n') if 'Location' in line][0]
+                        # Resolve the bundled GDAL/PROJ data path without shelling out to pip.
+                        gdal_module_path = os.path.dirname(getattr(gdal, '__file__', ''))
+                        gdal_search_roots = [
+                            gdal_module_path,
+                            os.path.dirname(gdal_module_path),
+                            sys.prefix,
+                            sys.base_prefix
+                        ]
 
-                        #First see if proj.db is where it should be
-                        if os.path.exists(os.path.join(gdal_path,'osgeo','data','proj','proj.db')):
-                            os.environ['PROJ_LIB'] = os.path.join(gdal_path,'osgeo','data','proj')
-                            useExisting = False                 #code found its own proj.db, so ignore one defined by PROJ_LIB
-                        #Otherwise do a search.
-                        else:
-                            for gdal_root, dirs, files in os.walk(gdal_path):
+                        for root_dir in gdal_search_roots:
+                            if not root_dir:
+                                continue
+
+                            candidate_proj_dirs = [
+                                os.path.join(root_dir, 'osgeo', 'data', 'proj'),
+                                os.path.join(root_dir, 'data', 'proj'),
+                                os.path.join(root_dir, 'Library', 'share', 'proj'),
+                                os.path.join(root_dir, 'share', 'proj')
+                            ]
+
+                            for candidate_dir in candidate_proj_dirs:
+                                if os.path.exists(os.path.join(candidate_dir, 'proj.db')):
+                                    os.environ['PROJ_LIB'] = candidate_dir
+                                    useExisting = False
+                                    break
+
+                            if not useExisting:
+                                break
+
+                        # Otherwise do a focused search rooted at the osgeo package.
+                        if useExisting and gdal_module_path and os.path.exists(gdal_module_path):
+                            for gdal_root, dirs, files in os.walk(gdal_module_path):
                                 if 'proj.db' in files:
                                     os.environ['PROJ_LIB'] = gdal_root
                                     useExisting = False
                                     config.set("checkProjLib",False)
+                                    break
 
                         #Trying to find the SSURGO installtion's proj.db failed (i.e. user might have it installed in an 
                         # unexpected location), so try to use the proj.db defined by PROJ_LIB
@@ -595,7 +624,7 @@ class dataloader:
             requestSubfolders = []
             for name in listdir(root):
                 childPath = path.join(root, name)
-                if  path.isdir(childPath):
+                if path.isdir(childPath) and not dataloader._shouldSkipAutoDiscoveredFolder(name):
                     # case: we have a folder
                     requestSubfolders.append(name)
         
@@ -606,6 +635,8 @@ class dataloader:
         isValidPretest = True
 
         for subfolder in requestSubfolders:
+            if dataloader._shouldSkipAutoDiscoveredFolder(subfolder):
+                continue
 
             (status, message, errormessage) = dataloader.checkTabularfolderpath(root, subfolder)         
             if not status:

@@ -168,14 +168,25 @@ export default class RasterFunctions{
         }
     }
     static setupListeners(){
-        document.getElementById("override-grid-size-input").addEventListener("keyup", 
-            ()=>{RasterFunctions.checkGridSizeInput("override-grid-size-input", "validationTextOverrideGridSize")}
-        )
-        document.getElementById("override-grid-size-input-db").addEventListener("keyup",
-            ()=>{RasterFunctions.checkGridSizeInput('override-grid-size-input-db', 'generateRasterValidationText')}
-        )
-        document.getElementById("generateRasterBtn").addEventListener("click", ()=>{
-            RasterFunctions.getRasters()
-        })
+        const overrideGridSizeInput = document.getElementById("override-grid-size-input")
+        if (overrideGridSizeInput){
+            overrideGridSizeInput.addEventListener("keyup", ()=>{
+                RasterFunctions.checkGridSizeInput("override-grid-size-input", "validationTextOverrideGridSize")
+            })
+        }
+
+        const overrideGridSizeInputDb = document.getElementById("override-grid-size-input-db")
+        if (overrideGridSizeInputDb){
+            overrideGridSizeInputDb.addEventListener("keyup", ()=>{
+                RasterFunctions.checkGridSizeInput('override-grid-size-input-db', 'generateRasterValidationText')
+            })
+        }
+
+        const generateRasterBtn = document.getElementById("generateRasterBtn")
+        if (generateRasterBtn){
+            generateRasterBtn.addEventListener("click", ()=>{
+                RasterFunctions.getRasters()
+            })
+        }
     }
 }

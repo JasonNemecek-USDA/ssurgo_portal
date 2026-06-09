@@ -1,4 +1,7 @@
 import {LitElement, html, classMap, styleMap, unsafeHTML, repeat} from './lit-all.min.mjs';
+
+const MAX_PROGRESS_MESSAGES = 300;
+
 export class ProgressDisplayElement extends LitElement {
     static properties = {
         progressTitle:{type: String},        
@@ -322,11 +325,11 @@ export class ProgressDisplayElement extends LitElement {
     }
 
     populateSuccessMessage(msg){
-        this._successMessages.push(msg);
+        this._successMessages = [...this._successMessages, msg].slice(-MAX_PROGRESS_MESSAGES);
     }    
 
     populateErrorMessage(msg){
-        this._failMessages.push(msg);
+        this._failMessages = [...this._failMessages, msg].slice(-MAX_PROGRESS_MESSAGES);
     }
 
     /**Populates the text in the toggleProgressErrorDiv*/

@@ -40,6 +40,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import config
 from urllib.request import urlopen
@@ -63,6 +64,7 @@ except:
     pass
 
 runmode = RunMode.UNDEFINED
+RUNTIME_RELAUNCH_CONTEXT_ENV = "SSURGO_RUNTIME_RELAUNCH_CONTEXT"
 
 
 def _runtime_root_path():
@@ -114,21 +116,75 @@ def _find_python_executable(version_string: str):
     return None
 
 
+def _read_relaunch_context():
+    """Read and clear relaunch context passed across execv."""
+    context_json = os.environ.pop(RUNTIME_RELAUNCH_CONTEXT_ENV, None)
+    if not context_json:
+        return None
+
+    try:
+        return json.loads(context_json)
+    except Exception:
+        return {"rawContext": context_json}
+
+
+def _set_relaunch_context(context):
+    try:
+        os.environ[RUNTIME_RELAUNCH_CONTEXT_ENV] = json.dumps(context)
+    except Exception:
+        pass
+
+
+def log_runtime_startup_metadata(runtime_metadata):
+    if not tlogger:
+        return
+
+    if not runtime_metadata:
+        tlogger.info("RuntimeStartupMetadata: unavailable")
+        return
+
+    try:
+        metadata_json = json.dumps(runtime_metadata, sort_keys=True)
+    except Exception:
+        metadata_json = str(runtime_metadata)
+
+    tlogger.info(f"RuntimeStartupMetadata: {metadata_json}")
+
+
 def ensure_runtime_python_environment():
     """Ensure the app runs under a supported Python version (relaunch if needed)."""
     supported_versions = config.get("supportedPythonVersions")
     current_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    target_version = supported_versions[-1]
+    runtime_metadata = {
+        "runtimeAction": "startup_check",
+        "activePythonVersion": current_version,
+        "activePythonExecutable": sys.executable,
+        "supportedPythonVersions": supported_versions,
+        "targetPythonVersion": target_version,
+        "relaunchContext": _read_relaunch_context(),
+    }
 
     if current_version in supported_versions:
-        return True
+        runtime_metadata["runtimeAction"] = "using_supported_runtime"
+        return (True, runtime_metadata)
 
-    target_version = supported_versions[-1]
     root_path = _runtime_root_path()
     env_fragment = target_version.replace(".", "")
     managed_env_dir = os.path.join(root_path, f"venv{env_fragment}")
     managed_env_python = _env_python_path(managed_env_dir)
+    runtime_metadata["managedEnvironmentDirectory"] = managed_env_dir
+    runtime_metadata["managedEnvironmentPython"] = managed_env_python
 
     if os.path.isfile(managed_env_python):
+        runtime_metadata["runtimeAction"] = "relaunch_existing_managed_environment"
+        _set_relaunch_context({
+            "strategy": "existing_managed_environment",
+            "fromVersion": current_version,
+            "toVersion": target_version,
+            "managedEnvironmentPython": managed_env_python,
+            "fromExecutable": sys.executable,
+        })
         print(
             f"Current Python {current_version} is unsupported. "
             f"Switching to existing runtime environment for Python {target_version}."
@@ -137,23 +193,36 @@ def ensure_runtime_python_environment():
 
     source_python = _find_python_executable(target_version)
     if not source_python:
+        runtime_metadata["runtimeAction"] = "unsupported_runtime_python_not_found"
         print(
             f"Current Python {current_version} is unsupported. "
             f"Please install Python {target_version}, then run SSURGO Portal again."
         )
-        return False
+        return (False, runtime_metadata)
 
     try:
+        runtime_metadata["runtimeAction"] = "build_and_relaunch_managed_environment"
+        runtime_metadata["sourcePythonExecutable"] = source_python
         print(
             f"Current Python {current_version} is unsupported. "
             f"Building local runtime environment with Python {target_version}..."
         )
         subprocess.run([source_python, "-m", "venv", managed_env_dir], check=True)
+        _set_relaunch_context({
+            "strategy": "new_managed_environment",
+            "fromVersion": current_version,
+            "toVersion": target_version,
+            "sourcePythonExecutable": source_python,
+            "managedEnvironmentPython": managed_env_python,
+            "fromExecutable": sys.executable,
+        })
         print("Runtime environment created. Restarting in the new environment...")
         os.execv(managed_env_python, [managed_env_python] + sys.argv)
     except Exception as ex:
+        runtime_metadata["runtimeAction"] = "managed_environment_build_failed"
+        runtime_metadata["error"] = str(ex)
         print(f"Failed to build local runtime environment: {ex}")
-        return False
+        return (False, runtime_metadata)
 
 
 def getMode(argv):
@@ -267,6 +336,25 @@ def test_zipfile_unittest(zip_path :str, file_path: str, new_file_name: str):
     with ZipFile(zip_path, 'a') as zipf:
         zipf.write(file_path, new_file_name)
 
+
+def refresh_supporting_files_async():
+    """Refresh supporting files without blocking UI/server startup."""
+    try:
+        start_time = time.time()
+        BD.check_for_sapolygons()
+        elapsed = round(time.time() - start_time, 2)
+        print(f"Finished refreshing supporting files ({elapsed}s)")
+        tlogger.info(f"Finished refreshing supporting files ({elapsed}s)")
+    except Exception as ex:
+        tlogger.warning(f"Supporting file refresh failed: {ex}")
+
+
+def start_supporting_file_refresh(runmode):
+    if runmode in (RunMode.SSURGO_PORTAL_UI, RunMode.SSURGO_PORTAL_DEBUG_BROWSER):
+        print("Refreshing supporting files in background")
+        tlogger.info("Refreshing supporting files in background")
+        threading.Thread(target=refresh_supporting_files_async, daemon=True).start()
+
 def main(argv):
     # HACK POINT for debugging: assign argv here to alter normal behavior when debugging.
     # The second element in the list could be input of a JSON file, for example:
@@ -274,7 +362,8 @@ def main(argv):
     try:
         response = None
 
-        if not ensure_runtime_python_environment():
+        runtime_ready, runtime_metadata = ensure_runtime_python_environment()
+        if not runtime_ready:
             return
 
         # What mode are we in?
@@ -285,16 +374,9 @@ def main(argv):
 
         # Connect to the logger
         initializeLogging(runmode)
+        log_runtime_startup_metadata(runtime_metadata)
 
-        #myqueue = multiprocessing.Queue()
-        #myprocess = multiprocessing.Process(target=BD.check_for_sapolygons, args=(myqueue,))
-        #myprocess.start()
-
-        #downloadMsg = myqueue.get()
-        print("Downloading supporting files")
-        BD.check_for_sapolygons()
-        print("Finished downloading supporting files")
-        #tlogger.info(downloadMsg)
+        start_supporting_file_refresh(runmode)
 
         # If initialization is required we'll pass the buck and then exit when finished.
         if RunMode.LIBRARY_INITIALIZATION == runmode:

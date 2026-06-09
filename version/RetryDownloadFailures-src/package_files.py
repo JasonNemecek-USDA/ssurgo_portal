@@ -52,11 +52,29 @@ print(f'Zipping {rootPath} to {targetFilename}')
 zip_file = ZipFile(targetFilename, 'w')
 os.chdir(rootPath)
 fname = []
+excluded_dirs = {
+    '__pycache__',
+    '.vscode',
+    'venv',
+    'venv311',
+    '.venv',
+}
+excluded_dir_prefixes = (
+    'tmp_retry_demo',
+)
 for root,d_names,f_names in os.walk('.'):
+	d_names[:] = [
+		d for d in d_names
+		if d not in excluded_dirs
+		and not any(d.startswith(prefix) for prefix in excluded_dir_prefixes)
+	]
 	for f in f_names:
 		fname.append(os.path.join(root, f))
 for f in fname:
-    if (not '__pycache__' in f) and (not '.vscode' in f) and (not 'sapoly.geojson' in f):
+    if (
+        (not 'sapoly.geojson' in f)
+        and (not f.endswith('.log'))
+    ):
         print("f = %s" %f)
         zip_file.write(f)
 zip_file.close()

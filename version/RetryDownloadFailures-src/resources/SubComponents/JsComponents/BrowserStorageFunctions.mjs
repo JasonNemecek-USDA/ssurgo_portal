@@ -24,8 +24,8 @@ export default class BrowserStorageFunctions{
         return cookie[cname];
     }
 
-    static setLocalStorage(name, value, defaultvalue = BrowserStorageFunctions.osPathSep == "\\" ? "C:/" : "/"){
-        if(value == undefined) value=defaultvalue
+    static setLocalStorage(name, value, defaultvalue = ""){
+        if(value == undefined || value == null) value=defaultvalue
         localStorage.setItem(name, value)
     }
 

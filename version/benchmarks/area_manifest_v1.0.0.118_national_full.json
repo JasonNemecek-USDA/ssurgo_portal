@@ -1,0 +1,16 @@
+{
+  "manifestId": "national-full-v1.0.0.118",
+  "description": "US states plus territories and outlying areas used for .118 SLA benchmarking.",
+  "selectionMode": "prefix_list",
+  "areaSymbolPrefixes": [
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+    "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+    "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+    "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+    "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+    "DC", "PR", "VI", "GU", "MP", "AS", "FM", "MH", "PW"
+  ],
+  "excludeAreaSymbols": [
+    "HT600"
+  ]
+}

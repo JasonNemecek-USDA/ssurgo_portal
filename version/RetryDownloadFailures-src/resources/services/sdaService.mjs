@@ -8,6 +8,28 @@ export async function checkSurveyAreas(localRecords, SDA_URL){
         "missingOnServer": [],
         "serverError": []
     };
+    localRecords = (Array.isArray(localRecords) ? localRecords : [])
+        .map((record) => {
+            if (!record || typeof record !== 'object') {
+                return null
+            }
+
+            const areaSymbol = record.areaSymbol ?? record.areasymbol ?? record.AREASYMBOL
+            if (!areaSymbol) {
+                return null
+            }
+
+            return {
+                ...record,
+                areaSymbol: String(areaSymbol),
+            }
+        })
+        .filter((record) => record !== null)
+
+    if (localRecords.length === 0) {
+        return discrepancies
+    }
+
     //sort records
     localRecords = localRecords.sort((a, b) => {
         if(a.areaSymbol < b.areaSymbol) {
@@ -67,6 +89,10 @@ export async function getSurveyAreas(areaSymbols, SDA_URL){
         return {status: "success", records: []};
     }
 
+    if (!SDA_URL) {
+        return {status: "error", message: "SDA URL is not configured", records: []};
+    }
+
     let sqlQuery = `~DeclareVarchar255Table(@maTable)~;Insert into @maTable (s) values ${areaSymbols.map(value => `('${value}')`).join(', ')};SELECT * FROM SDA_Get_AreasymbolWktWgs84_from_AreasymbolTable(@maTable);`;
 
     try{
@@ -77,7 +103,7 @@ export async function getSurveyAreas(areaSymbols, SDA_URL){
 
             const jsonObj = await apiService.post(SDA_URL, {'format': 'JSON', 'query': sqlQuery});
             //console.log(jsonObj);
-            const sastatusmap_records = jsonObj.Table;
+            const sastatusmap_records = Array.isArray(jsonObj?.Table) ? jsonObj.Table : [];
             //console.log(sastatusmap_records);
 
             const records = sastatusmap_records.map(rec => {return {areaSymbol: rec[0], areaName: rec[1], saverest: rec[2], saversion: rec[3]}});

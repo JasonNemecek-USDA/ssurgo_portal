@@ -1,12 +1,17 @@
 import io
 import json
 import os
+import shutil
+import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import webbrowser
 import config
-from datetime import date
+from socketserver import ThreadingMixIn
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
+from datetime import date, datetime, timezone
 from zipfile import ZipFile, is_zipfile
 from dlcore import dispatch
 from dlcore.SSURGODownloader import BulkDownloader
@@ -28,6 +33,7 @@ try:
         request,
         response,
         run,
+        ServerAdapter,
         static_file,
         template,
     )
@@ -40,6 +46,33 @@ JS_MIME_TYPE = "text/javascript"
 CSS_MIME_TYPE = "text/css; charset=UTF-8"
 SVG_MIME_TYPE = "image/svg+xml"
 RESOURCE_SUFFIX = "/resources/"
+
+
+class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    daemon_threads = True
+
+
+class _ThreadingWSGIServerIPv6(_ThreadingWSGIServer):
+    address_family = socket.AF_INET6
+
+
+class ThreadedWSGIRefServer(ServerAdapter):
+    """Threaded WSGIRef adapter so concurrent upload/unzip requests do not serialize."""
+
+    def run(self, handler):
+        host = self.host or ""
+        server_class = _ThreadingWSGIServerIPv6 if ':' in host else _ThreadingWSGIServer
+
+        server = make_server(
+            self.host,
+            self.port,
+            handler,
+            server_class=server_class,
+            handler_class=self.options.get("handler_class", WSGIRequestHandler),
+        )
+        server.serve_forever()
+
+
 # Logic to process template files from a PYZ file.
 if config.isPyzFile:
     # PYZ variables.
@@ -93,7 +126,7 @@ def check_internet_connection() -> dict:
     )
     url = config.get('wssUrl') + "app/"
     try:
-        wss_response = head(url, timeout=5)
+        wss_response = head(url, timeout=3)
         result_payload = {
             'status': True if wss_response.status_code == 200 else False,
             'wss_status_code': wss_response.status_code,
@@ -156,15 +189,18 @@ def get_version():
     # version.txt missing, etc.
     try:
         version_response = requests.get(
-            config.get("versionURLs")["versionTxtURL"], timeout=10)
+            config.get("versionURLs")["versionTxtURL"], timeout=3)
         if version_response.status_code == 200:
             return version_response.text
-        else:
-            response.status = 500
-            return 'Error fetching version information'
+        return 'Error fetching version information'
     except requests.RequestException as e:
-        response.status = 500
         return 'Error: ' + str(e)
+
+
+@webpage.get('/getVersionInfoLocal')
+def get_version_info_local():
+    response.content_type = 'application/json'
+    return json.dumps(config.get("versionInformation"))
 
 
 @webpage.route('/startUp')
@@ -178,6 +214,8 @@ def get_startup_info():
 
 @webpage.route('/SSURGOPortalUI')
 def display_ssurgo_portal_ui():
+    # Keep UI-facing version text/cookies in sync even when users load this route directly.
+    check_version_info()
     if config.isPyzFile:
         rendered_ssurgo_portal_ui = render_template(ssurgo_portal_ui)
         return rendered_ssurgo_portal_ui
@@ -203,50 +241,489 @@ def bulkssadownload():
     return result
 
 
+@webpage.post('/validateDownloadFolder')
+def validate_download_folder():
+    payload = request.json if isinstance(request.json, dict) else {}
+    location = payload.get('location')
+    return json.dumps(_validate_download_folder(location))
+
+
+@webpage.post('/preflightDownload')
+def preflight_download():
+    payload = request.json if isinstance(request.json, dict) else {}
+    location = payload.get('location')
+    min_free_disk_mb = payload.get('minFreeDiskMb')
+    min_available_memory_mb = payload.get('minAvailableMemoryMb')
+    return json.dumps(
+        _run_download_preflight(
+            location,
+            min_free_disk_mb=min_free_disk_mb,
+            min_available_memory_mb=min_available_memory_mb,
+        )
+    )
+
+
+@webpage.get('/defaultDownloadFolder')
+def default_download_folder():
+    return json.dumps(_get_default_download_folder())
+
+
+@webpage.get('/runtimeTelemetry')
+def runtime_telemetry():
+    response.content_type = 'application/json'
+    return json.dumps(_collect_runtime_telemetry())
+
+
+@webpage.post('/createDownloadFolder')
+def create_download_folder():
+    payload = request.json if isinstance(request.json, dict) else {}
+    parent = payload.get('parent')
+    folder_name = payload.get('folderName')
+    return json.dumps(_create_download_folder(parent, folder_name))
+
+
+def _validate_download_folder(location):
+    """Validate that a download target exists and is writable."""
+    if not isinstance(location, str) or not location.strip():
+        return {
+            "success": False,
+            "message": "Download folder is empty. Select a destination folder."
+        }
+
+    normalized_location = os.path.abspath(location.strip())
+    if _is_root_folder(normalized_location):
+        return {
+            "success": False,
+            "message": (
+                "The root of a drive/filesystem is not a valid download "
+                "target. Choose a writable subfolder."
+            )
+        }
+
+    if not os.path.exists(normalized_location):
+        return {
+            "success": False,
+            "message": f"Download folder does not exist: {normalized_location}"
+        }
+
+    if not os.path.isdir(normalized_location):
+        return {
+            "success": False,
+            "message": (
+                f"Download location is not a folder: {normalized_location}"
+            )
+        }
+
+    probe_path = None
+    try:
+        descriptor, probe_path = tempfile.mkstemp(
+            prefix='.__ssurgo_write_test_',
+            dir=normalized_location,
+        )
+        os.close(descriptor)
+    except OSError as ex:
+        return {
+            "success": False,
+            "message": (
+                f"Download folder is not writable: {normalized_location}. "
+                f"{ex}"
+            )
+        }
+    finally:
+        if probe_path and os.path.exists(probe_path):
+            try:
+                os.remove(probe_path)
+            except OSError:
+                pass
+
+    return {"success": True, "path": normalized_location}
+
+
+def _coerce_positive_int(value, default_value):
+    try:
+        parsed = int(value)
+        if parsed > 0:
+            return parsed
+    except (TypeError, ValueError):
+        pass
+
+    return default_value
+
+
+def _run_download_preflight(
+    location,
+    min_free_disk_mb=4096,
+    min_available_memory_mb=1024,
+):
+    normalized_min_disk_mb = _coerce_positive_int(min_free_disk_mb, 4096)
+    normalized_min_memory_mb = _coerce_positive_int(
+        min_available_memory_mb,
+        1024,
+    )
+
+    path_validation = _validate_download_folder(location)
+    if not path_validation.get('success'):
+        return {
+            'success': False,
+            'message': path_validation.get('message'),
+            'checks': {
+                'pathWritable': False,
+                'diskEnough': False,
+                'memoryEnough': False,
+            },
+        }
+
+    normalized_location = path_validation.get('path')
+    disk_usage = shutil.disk_usage(normalized_location)
+    disk_free_mb = round(disk_usage.free / (1024 * 1024), 2)
+    disk_enough = disk_free_mb >= normalized_min_disk_mb
+
+    memory_available_mb = None
+    memory_enough = True
+    memory_check_skipped = False
+    memory_message = None
+
+    try:
+        import psutil
+
+        memory_available_mb = round(
+            psutil.virtual_memory().available / (1024 * 1024),
+            2,
+        )
+        memory_enough = memory_available_mb >= normalized_min_memory_mb
+    except (
+        ImportError,
+        OSError,
+        AttributeError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as ex:
+        memory_check_skipped = True
+        memory_message = f'Unable to collect memory telemetry: {ex}'
+
+    success = disk_enough and memory_enough
+
+    messages = []
+    if not disk_enough:
+        messages.append(
+            (
+                'Insufficient disk space. '
+                f'Required {normalized_min_disk_mb} MB, '
+                f'available {disk_free_mb} MB.'
+            )
+        )
+    if not memory_enough:
+        messages.append(
+            (
+                'Insufficient available memory. '
+                f'Required {normalized_min_memory_mb} MB, '
+                f'available {memory_available_mb} MB.'
+            )
+        )
+    if memory_check_skipped and memory_message:
+        messages.append(memory_message)
+
+    if not messages:
+        messages.append('Preflight checks passed.')
+
+    return {
+        'success': success,
+        'path': normalized_location,
+        'message': ' '.join(messages),
+        'checks': {
+            'pathWritable': True,
+            'diskEnough': disk_enough,
+            'diskFreeMb': disk_free_mb,
+            'diskThresholdMb': normalized_min_disk_mb,
+            'memoryEnough': memory_enough,
+            'memoryAvailableMb': memory_available_mb,
+            'memoryThresholdMb': normalized_min_memory_mb,
+            'memoryCheckSkipped': memory_check_skipped,
+        },
+    }
+
+
+def _create_download_folder(parent_location, folder_name):
+    """Create a new child folder under a validated parent folder."""
+    if not isinstance(parent_location, str) or not parent_location.strip():
+        return {
+            "success": False,
+            "message": (
+                "Select a parent folder before creating a new folder."
+            )
+        }
+
+    normalized_parent = os.path.abspath(parent_location.strip())
+    if not os.path.exists(normalized_parent):
+        return {
+            "success": False,
+            "message": f"Parent folder does not exist: {normalized_parent}"
+        }
+
+    if not os.path.isdir(normalized_parent):
+        return {
+            "success": False,
+            "message": f"Parent location is not a folder: {normalized_parent}"
+        }
+
+    normalized_folder_name, validation_message = (
+        _validate_new_folder_name(folder_name)
+    )
+    if not normalized_folder_name:
+        return {
+            "success": False,
+            "message": validation_message,
+        }
+
+    target_path = os.path.abspath(
+        os.path.join(normalized_parent, normalized_folder_name))
+    try:
+        common_path = os.path.commonpath([
+            normalized_parent,
+            target_path,
+        ])
+        if common_path != normalized_parent:
+            return {
+                "success": False,
+                "message": (
+                    "Folder name must stay within the selected parent folder."
+                )
+            }
+    except ValueError:
+        return {
+            "success": False,
+            "message": (
+                "Folder name must stay within the selected parent folder."
+            )
+        }
+
+    if os.path.exists(target_path):
+        return {
+            "success": False,
+            "message": f"Folder already exists: {target_path}"
+        }
+
+    try:
+        os.makedirs(target_path, exist_ok=False)
+    except OSError as ex:
+        return {
+            "success": False,
+            "message": f"Unable to create folder: {ex}"
+        }
+
+    validation = _validate_download_folder(target_path)
+    if validation.get('success'):
+        return {
+            "success": True,
+            "path": validation.get('path', target_path),
+            "message": (
+                f"Created folder: {validation.get('path', target_path)}"
+            )
+        }
+
+    return validation
+
+
+def _validate_new_folder_name(folder_name):
+    if not isinstance(folder_name, str) or not folder_name.strip():
+        return (
+            None,
+            "Folder name is empty. Enter a name before creating the folder.",
+        )
+
+    normalized_name = folder_name.strip()
+    if normalized_name in ('.', '..'):
+        return None, "Folder name is invalid."
+
+    if (
+        '/' in normalized_name
+        or '\\' in normalized_name
+        or '\x00' in normalized_name
+    ):
+        return (
+            None,
+            "Folder name cannot include path separators or null characters.",
+        )
+
+    if os.name == 'nt':
+        invalid_chars = '<>:"/\\|?*'
+        if any(char in invalid_chars for char in normalized_name):
+            return None, "Folder name contains invalid characters for Windows."
+
+        if normalized_name.rstrip(' .') != normalized_name:
+            return None, "Folder name cannot end with a space or period."
+
+        if _is_reserved_windows_name(normalized_name):
+            return None, "Folder name is reserved by Windows."
+
+    return normalized_name, None
+
+
+def _is_reserved_windows_name(folder_name):
+    reserved_names = {
+        'CON', 'PRN', 'AUX', 'NUL',
+        'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+        'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+    }
+    return folder_name.split('.')[0].upper() in reserved_names
+
+
+def _is_root_folder(path):
+    normalized_path = os.path.abspath(path)
+    if normalized_path == os.path.abspath(os.sep):
+        return True
+
+    drive, drive_tail = os.path.splitdrive(normalized_path)
+    if drive and drive_tail in ('\\', '/'):
+        return True
+
+    return False
+
+
+def _get_default_download_folder():
+    """Resolve a safe, writable default download folder."""
+    home_dir = os.path.expanduser('~')
+    candidates = []
+
+    if home_dir and home_dir != '~':
+        candidates.append(os.path.join(home_dir, 'Downloads', 'SSURGO'))
+        candidates.append(os.path.join(home_dir, 'Documents', 'SSURGO'))
+
+    candidates.append(os.path.join(os.getcwd(), 'SSURGO_Downloads'))
+
+    for candidate in candidates:
+        try:
+            os.makedirs(candidate, exist_ok=True)
+        except OSError:
+            continue
+
+        validation = _validate_download_folder(candidate)
+        if validation.get('success'):
+            return {
+                'success': True,
+                'path': validation['path'],
+            }
+
+    return {
+        'success': False,
+        'message': 'Unable to determine a writable default download folder.'
+    }
+
+
+def _collect_runtime_telemetry():
+    telemetry = {
+        'success': True,
+        'timestampUtc': (
+            datetime.now(timezone.utc)
+            .isoformat(timespec='seconds')
+            .replace('+00:00', 'Z')
+        ),
+        'pid': os.getpid(),
+        'pythonVersion': (
+            f"{sys.version_info.major}."
+            f"{sys.version_info.minor}."
+            f"{sys.version_info.micro}"
+        ),
+        'platform': sys.platform,
+    }
+
+    try:
+        import psutil
+
+        virtual_memory = psutil.virtual_memory()
+        process_info = psutil.Process(os.getpid())
+        process_memory = process_info.memory_info()
+
+        telemetry.update({
+            'cpuPercent': round(psutil.cpu_percent(interval=0.1), 2),
+            'memoryPercent': round(float(virtual_memory.percent), 2),
+            'memoryUsedMb': round(virtual_memory.used / (1024 * 1024), 2),
+            'memoryAvailableMb': round(virtual_memory.available / (1024 * 1024), 2),
+            'processRssMb': round(process_memory.rss / (1024 * 1024), 2),
+        })
+    except (ImportError, OSError, AttributeError, RuntimeError, TypeError, ValueError) as ex:
+        telemetry['success'] = False
+        telemetry['message'] = f'Unable to collect psutil telemetry: {ex}'
+
+    return telemetry
+
+
 @webpage.post('/uploadBlob')
 def upload_blob():
     """Save zip content from browser memory to disk."""
 
     filename = request.forms.filename
-    print(filename)
     location = request.forms.location
-    print(location)
     overwrite = request.forms.overwrite
-    print(overwrite)
     upload = request.files.get('file')
-    if upload:
-        print(upload.filename)
-    else:
+    if not upload:
         return json.dumps(
             {"success": False, "message": "No file was provided."})
 
-    blob = upload.file.read()
     filepath = filename
 
     if location:
         filepath = os.path.join(location, filename)
 
-    if overwrite == "1":
-        with open(filepath, 'wb') as f:
-            print(filepath)
-            f.write(blob)
-    else:
-        with open(filepath, 'xb') as f:
-            print(filepath)
-            f.write(blob)
+    result = _save_upload_stream(upload.file, filepath, overwrite == "1")
+    return json.dumps(result)
 
-    return json.dumps({"success": True})
+
+def _save_upload_stream(upload_stream, filepath, overwrite):
+    """Write an uploaded file stream to disk and close temp handles."""
+    write_mode = 'wb' if overwrite else 'xb'
+
+    try:
+        with open(filepath, write_mode) as f:
+            upload_stream.seek(0)
+            shutil.copyfileobj(upload_stream, f, length=16 * 1024 * 1024)
+    except FileExistsError:
+        # If overwrite is off and the zip already exists, treat as reusable.
+        return {
+            "success": True,
+            "alreadyExists": True,
+            "message": "File already exists; reusing existing archive."
+        }
+    except OSError as ex:
+        return {
+            "success": False,
+            "message": f"Failed to write file: {ex}"
+        }
+    finally:
+        # Bottle stores uploads in temporary files; close them promptly.
+        try:
+            upload_stream.close()
+        except OSError:
+            pass
+
+    return {"success": True}
+
+
+def _can_extractall_without_overwrite(zip_ref, location):
+    """Return True when archive roots are absent and extractall is safe."""
+    root_entries = set()
+    for member in zip_ref.infolist():
+        normalized_name = member.filename.replace('\\', '/')
+        parts = [part for part in normalized_name.split('/') if part]
+        if parts:
+            root_entries.add(parts[0])
+
+    if not root_entries:
+        return True
+
+    return all(
+        not os.path.exists(os.path.join(location, entry))
+        for entry in root_entries
+    )
 
 
 @webpage.post('/uncompress')
 def uncompress():
 
     location = request.forms.location
-    print(location)
     overwrite = request.forms.overwrite
-    print(overwrite)
     file = request.forms.file
-    print(file)
 
     if file:
         archive_path = os.path.join(location, file)
@@ -260,10 +737,13 @@ def uncompress():
                 {"success": False, "message": "File is not a zip file."})
 
         with ZipFile(archive_path, "r") as zip_ref:
-            for member in zip_ref.infolist():
-                file_path = os.path.join(location, member.filename)
-                if (not os.path.exists(file_path)) or (overwrite == "1"):
-                    zip_ref.extract(member, location)
+            if overwrite == "1" or _can_extractall_without_overwrite(zip_ref, location):
+                zip_ref.extractall(location)
+            else:
+                for member in zip_ref.infolist():
+                    file_path = os.path.join(location, member.filename)
+                    if not os.path.exists(file_path):
+                        zip_ref.extract(member, location)
 
         os.remove(archive_path)
         return json.dumps({"success": True,
@@ -282,10 +762,9 @@ def get_log_file():
 
 @webpage.post('/close')
 def kill_server():
-    if config.isPyzFile:
-        sys.stderr.close()
-    else:
-        print("KILL SERVER COMMAND")
+    # Keep /close as a benign endpoint; do not close std streams in packaged mode.
+    print("KILL SERVER COMMAND")
+    return None
 
 
 @webpage.get('/serverStatus')
@@ -300,17 +779,36 @@ def is_server_running():
 
 @webpage.post('/fileExists')
 def file_exists():
-    failed_folders = []
     if isinstance(request.json, list):
         requested_folders = request.json
     elif isinstance(request.json, str):
         requested_folders = [request.json]
     else:
         requested_folders = []
-    for folder in requested_folders:
-        if not os.path.exists(folder):
-            failed_folders.append(folder)
+
+    failed_folders = _find_missing_folders(requested_folders)
     return json.dumps({"failedfolders": failed_folders})
+
+
+def _find_missing_folders(requested_folders):
+    failed_folders = []
+    for folder in requested_folders:
+        if not isinstance(folder, str):
+            failed_folders.append(folder)
+            continue
+
+        normalized_folder = folder.strip()
+        if not normalized_folder:
+            failed_folders.append(folder)
+            continue
+
+        try:
+            if not os.path.exists(normalized_folder):
+                failed_folders.append(folder)
+        except (OSError, TypeError, ValueError):
+            failed_folders.append(folder)
+
+    return failed_folders
 
 # Returns static files like JS and CSS
 
@@ -358,7 +856,8 @@ def server_static_js(filename):
 @webpage.route('/static/sapoly.geojson')
 def load_sapoly():
     if config.isPyzFile:
-        return static_file("sapoly.geojson", root="./")
+        pyz_root = os.path.dirname(os.path.abspath(sys.argv[0]))
+        return static_file("sapoly.geojson", root=pyz_root)
     else:
         return static_file("sapoly.geojson", fullPath + RESOURCE_SUFFIX)
 
@@ -533,27 +1032,27 @@ def get_uswds_image(filename):
 
 
 @webpage.route('/uswds/img/<iconType>/<filename>')
-def get_nested_uswds_image(icon_type, filename):
+def get_nested_uswds_image(iconType, filename):
     if config.isPyzFile:
         response.body = render_template(
-            f'resources/uswds/images/{icon_type}/{filename}')
+            f'resources/uswds/images/{iconType}/{filename}')
         response.content_type = SVG_MIME_TYPE
         return response
     return static_file(
         filename,
         fullPath +
         "/resources/uswds/images/" +
-        icon_type,
+        iconType,
         SVG_MIME_TYPE)
 
 
 @webpage.route('/uswds/fonts/<fontFolder>/<filename>')
-def get_font(font_folder, filename):
+def get_font(fontFolder, filename):
     if config.isPyzFile:
         with ZipFile(zippath) as dpzip:
-            font_resource = f"resources/uswds/fonts/{font_folder}/{filename}"
+            font_resource = f"resources/uswds/fonts/{fontFolder}/{filename}"
             with dpzip.open(font_resource) as font_result:
-                response.body = font_result.read()
+                font_bytes = font_result.read()
         extension = os.path.splitext(filename)[1].lower()
         font_mime_types = {
             ".woff": "font/woff",
@@ -563,12 +1062,12 @@ def get_font(font_folder, filename):
         }
         response.content_type = font_mime_types.get(
             extension, "application/octet-stream")
-        return response
+        return font_bytes
     return static_file(
         filename,
         fullPath +
         "/resources/uswds/fonts/" +
-        font_folder)
+        fontFolder)
 
 # Called from __main__.py.
 
@@ -608,44 +1107,57 @@ def check_version_info():
 
 def run_server():
     """Run the Bottle server and open the browser."""
-    if config.isPyzFile:
-        threading.Thread(
-            target=run,
-            kwargs={
-                "app": webpage,
-                "host": "localhost",
-                "port": 8083}).start()
-    else:
-        threading.Thread(
-            target=run,
-            kwargs={
-                "app": webpage,
-                "host": "localhost",
-                "port": 8083,
-                "debug": True}).start()
+    bind_host = _resolve_bind_host()
+    startup_url = _build_startup_url(bind_host)
+
+    # Keep server in the main thread so the process remains alive after startup.
     threading.Thread(
         target=webbrowser.open,
         args=[
-            'http://localhost:8083/startUp',
+            startup_url,
             1,
             True],
         daemon=True).start()
 
+    if config.isPyzFile:
+        run(app=webpage, host=bind_host, port=8083, server=ThreadedWSGIRefServer)
+    else:
+        run(
+            app=webpage,
+            host=bind_host,
+            port=8083,
+            debug=True,
+            server=ThreadedWSGIRefServer,
+        )
+
 
 def run_server_debugging(argv):
+    threading.Thread(target=subprocess.run, args=[argv], kwargs={"check": False}, daemon=True).start()
+
+    bind_host = _resolve_bind_host()
     if config.isPyzFile:
-        threading.Thread(
-            target=run,
-            kwargs={
-                "app": webpage,
-                "host": "localhost",
-                "port": 8083}).start()
+        run(app=webpage, host=bind_host, port=8083)
     else:
-        threading.Thread(
-            target=run,
-            kwargs={
-                "app": webpage,
-                "host": "localhost",
-                "port": 8083,
-                "debug": True}).start()
-    subprocess.run(argv, check=False)
+        run(app=webpage, host=bind_host, port=8083, debug=True)
+
+
+def _build_startup_url(bind_host: str) -> str:
+    host_for_url = bind_host
+    if ':' in bind_host and not bind_host.startswith('['):
+        host_for_url = f'[{bind_host}]'
+    return f'http://{host_for_url}:8083/startUp'
+
+
+def _resolve_bind_host() -> str:
+    """Bind to the local localhost family used on this machine (IPv6 or IPv4)."""
+    try:
+        addresses = socket.getaddrinfo("localhost", 8083, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        for family, _, _, _, sockaddr in addresses:
+            if family == socket.AF_INET6:
+                return sockaddr[0]
+        for family, _, _, _, sockaddr in addresses:
+            if family == socket.AF_INET:
+                return sockaddr[0]
+    except Exception:
+        pass
+    return "127.0.0.1"

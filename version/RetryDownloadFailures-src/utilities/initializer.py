@@ -24,6 +24,10 @@ The Python library needs to be initialized (this is normally a one-time
 operation). You must be connected to the Internet for this operation to 
 succeed.''')
     print()
+    if environ.get("SSURGO_AUTO_INIT") == "1" or not sys.stdin.isatty():
+        tlogger.info('askToProceed: auto-approving initialization')
+        print('Auto mode enabled; proceeding with initialization...')
+        return True
     response = input('Enter "p" to proceed, anything else to quit: ')
     if response and len(response) >= 1:
         tlogger.info('askToProceed: response == "p"')
@@ -43,6 +47,9 @@ def notifyCompletion(status: bool, message: str, showVerboseMessage: bool):
             print(message)
 
     print()
+    if environ.get("SSURGO_AUTO_INIT") == "1" or not sys.stdin.isatty():
+        tlogger.info(f'Initialization completed with status={status} (auto mode, no prompt)')
+        return
     response = input('Press the "Enter" key to finish the initialization: ')
     tlogger.info(f'Initialization completed with status={status}')
 
@@ -320,8 +327,14 @@ def performInitialization(showVerboseMessage: bool):
         #Set message to avoid an Unbound Error
         message = versionErrorMessage
         tlogger.debug(versionErrorMessage)
-        input("The executing version of Python {} is not currently supported by SSURGO Portal. The supported versions are between {} and {}. Press Enter to continue."
-                .format(versionString, config.get("supportedPythonVersions")[0], config.get("supportedPythonVersions")[-1]))
+        unsupported_message = (
+            "The executing version of Python {} is not currently supported by SSURGO Portal. "
+            "The supported versions are between {} and {}."
+        ).format(versionString, config.get("supportedPythonVersions")[0], config.get("supportedPythonVersions")[-1])
+        if environ.get("SSURGO_AUTO_INIT") == "1" or not sys.stdin.isatty():
+            print(unsupported_message)
+        else:
+            input(unsupported_message + " Press Enter to continue.")
         return (False, versionErrorMessage)
     # Install GDAL wheel if needed
     # Usage: (status, message) = installGdal(True/False)
@@ -345,7 +358,10 @@ def performInitialization(showVerboseMessage: bool):
                 message = """Your Linux Distribution: {}, is not supported to automatically install GDAL. In order for SSURGO Portal to run properly, you must 
                 install this library independently. All other libraries will be installed. Press Enter to continue.""".format(distro)
                 tlogger.warning(message)
-                input(message)
+                if environ.get("SSURGO_AUTO_INIT") == "1" or not sys.stdin.isatty():
+                    print(message)
+                else:
+                    input(message)
         else:
             return(False, "You are running an unsupported operating system.")
     # Initialize libraries from Internet
