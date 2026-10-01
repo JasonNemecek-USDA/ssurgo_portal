@@ -1,0 +1,5 @@
+{
+    "appmod.experimental.enableExperimentalTasks": true,
+    "appmod.experimental.task.websphere.lite": true,
+    "appmod.javaUpgrade.enableQuickPick": true
+}

@@ -181,21 +181,16 @@ class BulkDownloader:
                 #myqueue.put(f"SA Polygons are up to date: {file_path}")
                 tlogger.info(f"SA Polygons are up to date: {file_path}")
             elif most_recent < datetime.strptime(last_edit, '%Y-%m-%d'):
-                try:
-                    tlogger.info(f"Found a newer SA Polygon. Downloading new polygon file: {file_path}")
-                    #myqueue.put(f"Updating SA Polygons: {file_path}")
-                    os.rename(file_path, file_path + "_old")
-                    BulkDownloader.download_sapoly_file(file_path)
-                    os.remove(file_path + "_old")
-                except FileNotFoundError:
-                    #myqueue.put(f"{file_path} not found")
-                    tlogger.error(f"{file_path} not found")
+                tlogger.info(f"Found a newer SA Polygon. Downloading new polygon file: {file_path}")
+                replacement_path = file_path + ".download"
+                if BulkDownloader.download_sapoly_file(replacement_path):
+                    os.replace(replacement_path, file_path)
             else:
                 #myqueue.put(f"Date mismatch: {file_path} claims to be more recent than SDMDataAccess version")
                 tlogger.warning(f"Date mismatch: {file_path} claims to be more recent than SDMDataAccess version")
     
     @staticmethod
-    def download_sapoly_file(file_path: str):
+    def download_sapoly_file(file_path: str) -> bool:
         """Download the sapoly.geojson file from WSS."""
         try:
             tlogger.info(f"Downloading sapoly.geojson from {config.get('sapolyDownloadUrl')} to {file_path}")
@@ -203,9 +198,13 @@ class BulkDownloader:
             urlretrieve(config.get("sapolyDownloadUrl"), file_path)
             tlogger.info(f"Finished downloading sapoly.geojson")
             print(f"Finished downloading sapoly.geojson to {file_path}")
+            return True
         except Exception as e:
-            tlogger.error(f"Failed to download the sapoly.geojson file from {config.get('sapolyDownloadUrl')}: {e}")
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            tlogger.warning(f"Failed to refresh sapoly.geojson from {config.get('sapolyDownloadUrl')}; keeping existing file: {e}")
             print("An error occured trying to download the sapoly.geojson file")
+            return False
 
     def _clear_partial_survey_paths(self, areaSym, zipName, root_names=None):
         """Remove partially extracted survey data when unzip/download fails."""

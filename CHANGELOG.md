@@ -5,6 +5,120 @@ All notable changes to this project should be documented in this file.
 ## [Unreleased]
 - Add tracking for TODOs and repo-level work items with `TODO.md`
 - Add initial release tracking with `CHANGELOG.md`
+- Prevent slow Web Soil Survey archive transfers from timing out before any surveys complete:
+	- measured the production WSS endpoint at approximately `51 KB/s`; the representative `26,579,946`-byte AK600 archive needs about `8.6` minutes in isolation.
+	- increased blob-transfer timeouts from `2-4` minutes to `15` minutes (turbo), `20` minutes (balanced), and `30` minutes (constrained), while preserving retry counts and backoff behavior.
+	- native browser `TimeoutError` failures now follow the configured retry path instead of escaping after the first attempt.
+	- removed stale duplicate blob policies from the worker so `apiService.mjs` is the single timeout-policy owner.
+	- added Node regression coverage for exact profile timeouts, explicit overrides, and browser timeout retries.
+	- packaged `.120` validation: real `HI995` download extracted `spatial` and `tabular` data with zero retries; `3` Node tests and `44` Python tests passed; `/startUp` and `/serverStatus` returned `200`; full smoke returned `E2E_SMOKE_OK` with `IMPORT_MS=3727`.
+- Preserve the packaged runtime's local `sapoly.geojson` when the USDA refresh endpoint is unavailable:
+	- `BulkDownloader.check_for_sapolygons()` now downloads newer polygon data to a temporary sibling and atomically replaces the known-good file only after a successful transfer.
+	- failed refreshes remove partial downloads and emit a warning instead of an application error.
+	- added regression coverage proving an HTTP failure leaves the existing polygon intact.
+	- packaged `.120` validation: `44` targeted tests passed; `/startUp` and `/serverStatus` returned `200`; full smoke returned `E2E_SMOKE_OK` with `IMPORT_MS=799`.
+- Implement .120 import optimizer slice for nationwide-scale imports:
+	- backend `version/RetryDownloadFailures-src/dlcore/dataloader.py` now caches tabular import plans per database, streams tabular inserts in configurable chunks, and skips repeated SDV metadata refreshes when the incoming SDV signature is unchanged for the same target database.
+	- backend `importcandidates` accepts optimizer hints (`importoptimizerprofile`, `updatembrthisbatch`) to reduce expensive full-MBR recalculation on every large batch.
+	- frontend `version/RetryDownloadFailures-src/resources/SubComponents/JsComponents/DatabaseFunctions.mjs` now enables a dedicated national profile at 3000+ folders, adaptive batch scaling (bounded national window), and in-flight queue visibility to avoid long no-update windows.
+	- config `version/RetryDownloadFailures-src/config.py` bumped `ApplicationVersion` to `1.0.0.120` and added `tabularInsertChunkSize` + `enableSdvSignatureCache` feature controls.
+- Activate packaged .120 runtime and visible-launch path:
+	- rebuilt runtime artifacts `version/SSURGO_Portal-1.0.0.120.pyz` and `version/SSURGO_Portal-1.0.0.120.cmd` from `version/RetryDownloadFailures-src`.
+	- updated `start_ssurgo_visible.cmd` target from `.119` to `.120` so external CMD/browser launches run the current optimizer code.
+	- validated live runtime serves updated `DatabaseFunctions.mjs` content with `importoptimizerprofile`, `updatembrthisbatch`, and in-flight counter logic.
+- Validate .120 optimizer changes with command-backed evidence:
+	- `python -m unittest tests.test_pretest_quickmode -v` => `3/3` passing
+	- `python -m py_compile dlcore/dataloader.py config.py` => syntax clean
+	- `node --check resources/SubComponents/JsComponents/DatabaseFunctions.mjs` => syntax clean
+	- `skills/session-ops/scripts/run_end_to_end_smoke.ps1 -StartRuntimeIfNeeded:$false -OpenBrowser:$false` => `E2E_SMOKE_OK`, `PRETEST_MS=168`, `INDEXED_PRETEST_MS=153`, `IMPORT_MS=10604`
+- Capture .120 national checkpoint benchmark evidence:
+	- added scripted harness `tmp/agent/run_national_checkpoint_120.ps1` for repeatable pretest/import timing capture against full candidate list.
+	- checkpoint artifact: `version/benchmarks/runs/20260611_131256/national_checkpoint_120.json`.
+	- checkpoint result: `validCandidateCount=3367`, `sampleCount=8`, `importTotalSeconds=55.88`, `projectedTotalMinutes=391.98`, `MEETS_30_MIN=False`.
+	- outcome: 30-minute SLA gate remains open and requires additional ingest/spatial optimization work.
+- National-scale spatial import acceleration follow-up (.120):
+	- frontend `version/RetryDownloadFailures-src/resources/SubComponents/JsComponents/DatabaseFunctions.mjs` now auto-enables `loadspatialdatawithinsubprocess` for national-scale imports (3000+ folders) while preserving explicit user override behavior.
+	- benchmark harness `tmp/agent/run_national_checkpoint_120.ps1` now supports deterministic selection (`-SelectionMode first|random`, `-RandomSeed`) and subprocess A/B toggles (`-LoadSpatialInSubprocess`) for reproducible checkpoint comparisons.
+	- A/B checkpoint evidence (`sampleCount=8`, `batchSize=8`, `selectionMode=first`):
+		- baseline artifact `version/benchmarks/runs/20260611_132837/national_checkpoint_120.json`: `importTotalSeconds=64.95`, `projectedTotalMinutes=455.60`, `MEETS_30_MIN=False`
+		- subprocess artifact `version/benchmarks/runs/20260611_132944/national_checkpoint_120.json`: `importTotalSeconds=49.52`, `projectedTotalMinutes=347.36`, `MEETS_30_MIN=False`
+		- measured delta: ~23.8% faster on this checkpoint sample, but SLA remains open.
+- Import progress counter and fatal-db fail-fast hardening (.120):
+	- frontend `version/RetryDownloadFailures-src/resources/SubComponents/JsComponents/DatabaseFunctions.mjs` now reports processed totals in the progress counter (`<processed> out of <total> imports processed`) with explicit loaded/failed/in-progress/queued breakdown to avoid misleading "0 loaded" messaging during high-failure runs.
+	- import loop now treats `database disk image is malformed` as a fatal database condition and aborts remaining folders instead of continuing a cascading failure storm.
+	- packaged runtime `version/SSURGO_Portal-1.0.0.120.pyz` was hot-patched with updated `resources/SubComponents/JsComponents/DatabaseFunctions.mjs`; archive integrity and marker presence were verified (`PATCH_PYZ_OK`, `HAS_PROCESSED_COUNTER=True`, `HAS_FATAL_FAILFAST=True`).
+	- runtime evidence captured from `version/main_RunMode.SSURGO_PORTAL_UI_log.log` shows repeated malformed-db errors during the reported run, for example:
+		- `Error deleting existing areasymbols before import: database disk image is malformed`
+		- repeated shapefile update failures with `sqlite3_exec(... gpkg_contents ...) failed: database disk image is malformed`
+- Help-page static asset delivery hardening (.120):
+	- backend `version/RetryDownloadFailures-src/dphost/webpage.py` now sets explicit JS MIME responses and no-cache headers for `/uswds/javascript/*` and `/leaflet/javascript/*` in both packaged (PYZ) and source runtime paths.
+	- backend now also applies no-cache headers for `/uswds/css/*` and `/leaflet/css/*` to prevent stale UI asset reuse.
+	- packaged runtime `version/SSURGO_Portal-1.0.0.120.pyz` was hot-patched with updated `dphost/webpage.py` (`PYZ_PATCHED=1`).
+	- runtime evidence after relaunch:
+		- `/startUp=200`, `/serverStatus=200`
+		- `/uswds/javascript/uswds.min.js` => `Content-Type: text/javascript`
+		- `/leaflet/javascript/leaflet.js` => `Content-Type: text/javascript`
+		- `/uswds/css/styles.css` => `Content-Type: text/css; charset=UTF-8`
+		- affected routes now return `Cache-Control: no-store, must-revalidate, no-cache, max-age=0`
+	- no-regression smoke check completed via `skills/session-ops/scripts/run_end_to_end_smoke.ps1` with terminal exit code `0`.
+	- regression tests added in `version/RetryDownloadFailures-src/tests/test_webpage_upload.py` to pin static-route behavior for USWDS/Leaflet JS and CSS:
+		- non-PYZ routes assert explicit `mimetype` usage for JS/CSS static responses.
+		- PYZ routes assert `text/javascript` response content type and cache-control header emission for JS routes.
+	- validation evidence: `version/RetryDownloadFailures-src/.\\venv311\\Scripts\\python.exe -m unittest tests.test_webpage_upload -v` => `26` passing.
+	- full smoke rerun after test hardening: `SSURGO: Full End-to-End Smoke` task (`skills/session-ops/scripts/run_end_to_end_smoke.ps1`) exited with code `0`.
+- Prevent duplicate startup browser launches in packaged `.120` runtime:
+	- backend `version/RetryDownloadFailures-src/dphost/webpage.py` now gates runtime auto-open with `SSURGO_LAUNCH_BROWSER` via `_should_open_browser_on_startup()`; default behavior remains unchanged when unset, while explicit `0/false/no/off` disables host-side browser launch.
+	- launcher `version/SSURGO_Portal-1.0.0.120.cmd` now sets `SSURGO_LAUNCH_BROWSER=0` so packaged startup relies on the single external browser path.
+	- packaged activation evidence:
+		- `version/SSURGO_Portal-1.0.0.120.pyz` hot-patched with updated `dphost/webpage.py` (`PATCH_PYZ_OK=True`).
+		- archive inspection confirms `HAS_LAUNCH_GATE=True` and `HAS_SHOULD_OPEN_HELPER=True`.
+	- regression coverage expanded in `version/RetryDownloadFailures-src/tests/test_webpage_upload.py` (`TestBrowserLaunchStartupGate`) for env-unset, enabled, and disabled startup behavior.
+	- validation evidence: `version/RetryDownloadFailures-src/.\\venv311\\Scripts\\python.exe -m unittest tests.test_webpage_upload -v` => `Ran 29 tests ... OK`.
+	- no-regression/runtime evidence:
+		- `skills/session-ops/scripts/run_end_to_end_smoke.ps1 -StartRuntimeIfNeeded -OpenBrowser:$false` exited `0`.
+		- startup endpoint checks reported `/startUp=200` and `/serverStatus=200` after relaunch.
+		- skip-marker scan returned `BROWSER_SKIP_LOG=NOT_FOUND_ANY_LOG`; startup gate correctness is therefore pinned by deterministic unit tests and packaged launch configuration.
+- Close LIVE-003 import folder location-change UX validation loop:
+	- regression contract tests added in `version/RetryDownloadFailures-src/tests/test_import_folder_ui_contract.py` to pin:
+		- loading overlay includes `changeFolderDuringPretestBtn` with `Change folder location` action.
+		- pretest flow keeps browse controls enabled (`selectedFolderNameBrowseBtn`, `selectDatabaseBrowseBtn`) and queues folder changes while pretests are in-flight.
+	- runtime evidence (external launch path):
+		- launched via `start_ssurgo_visible.cmd` and external browser `http://localhost:8083/SSURGOPortalUI`.
+		- endpoint checks: `/startUp=200`, `/serverStatus=200`.
+		- static route probes: `UI_HAS_CHANGE_FOLDER_BTN=True`, `UI_HAS_CHANGE_FOLDER_LABEL=True`, `JS_HAS_INFLIGHT_GUARD=True`, `JS_HAS_QUEUE_WARNING=True`, `JS_KEEPS_BROWSE_ENABLED=True`.
+	- validation evidence:
+		- `version/RetryDownloadFailures-src/.\\venv311\\Scripts\\python.exe -m unittest tests.test_import_folder_ui_contract -v` => `Ran 2 tests ... OK`.
+		- `version/RetryDownloadFailures-src/.\\venv311\\Scripts\\python.exe -m unittest tests.test_webpage_upload -v` => `Ran 29 tests ... OK`.
+		- `skills/session-ops/scripts/run_end_to_end_smoke.ps1 -StartRuntimeIfNeeded -OpenBrowser:$false` => `LASTEXITCODE=0`.
+- Revalidate no-regression smoke after subprocess optimization:
+	- `skills/session-ops/scripts/run_end_to_end_smoke.ps1 -StartRuntimeIfNeeded:$false -OpenBrowser:$false` => `E2E_SMOKE_OK`
+	- latest captured markers: `PRETEST_MS=199`, `INDEXED_PRETEST_MS=79`, `IMPORT_MS=9274`, `LASTEXITCODE=0`
+- Refresh runtime launch/log evidence for this step:
+	- launch path executed via `start_ssurgo_visible.cmd` and external browser `http://localhost:8083/SSURGOPortalUI`
+	- startup health checks returned `/startUp=200` and `/serverStatus=200`
+	- latest startup marker logged at `2026-06-11 13:01:14,483` (`RuntimeStartupMetadata`)
+	- post-startup runtime log scan reported `POST_STARTUP_ERROR_COUNT=0`
+- Refresh .118 runtime validation documentation with command-backed evidence:
+	- launch path executed via `start_ssurgo_visible.cmd` and external browser `http://localhost:8083/SSURGOPortalUI`
+	- startup health stabilized at `/startUp=200` and `/serverStatus=200` after initial warm-up probe
+	- latest startup marker logged at `2026-06-11 12:20:33,449` (`RuntimeStartupMetadata`)
+	- post-startup runtime log scan reported `POST_STARTUP_ERROR_COUNT=0`
+- Reduce Import pretest request timeout to 60 seconds and harden folder-change behavior by queueing path changes while a pretest is in-flight in `version/RetryDownloadFailures-src/resources/ssurgo_portal_scripts.js`.
+- Keep folder browse actions enabled during pretest spinner and add an explicit `Change folder location` action on the loading overlay in `version/RetryDownloadFailures-src/resources/ssurgo_portal_UI.html`.
+- Add indexed quick-pretest mode for very large subfolder sets (1000+ entries) to avoid full linear pretest scans in `version/RetryDownloadFailures-src/dlcore/dataloader.py`.
+- Summarize oversized `subfolders` payload logging to count/sample format to reduce request logging overhead in `version/RetryDownloadFailures-src/dlcore/dispatch.py`.
+- Add full-flow smoke automation script `skills/session-ops/scripts/run_end_to_end_smoke.ps1` and VS Code task `SSURGO: Full End-to-End Smoke` in `.vscode/tasks.json`.
+- Add targeted regression coverage for indexed pretest behavior, detailed quick-pretest behavior, and dispatch large-payload log summarization in `version/RetryDownloadFailures-src/tests/test_pretest_quickmode.py`.
+- Harden smoke automation gates in `skills/session-ops/scripts/run_end_to_end_smoke.ps1`:
+	- add indexed quick-pretest validation (`INDEXED_PRETEST_COUNT`, `INDEXED_PRETEST_MS`)
+	- tighten log-level matching to real `ERROR`/`CRITICAL` tokens only
+	- include regression-pattern checks for `413`/`Request Entity Too Large`/`database is locked`
+- Rebuild and validate packaged runtime artifact `version/SSURGO_Portal-1.0.0.119.pyz` after source fixes (zip integrity check + patched entries present).
+- Add runtime startup compatibility tests in `version/RetryDownloadFailures-src/tests/test_runtime_startup_paths.py` that mimic:
+	- Python `3.10` supported in-place startup (UI path)
+	- Python `3.14` relaunch handoff to managed `3.11` runtime and resumed startup metadata path
+- Flatten Create Database output path generation in `version/RetryDownloadFailures-src/resources/ssurgo_portal_scripts.js` so selecting a parent folder (for example `C:\gis`) targets direct database files (`<parent>/<name>.gpkg` or `.sqlite`) instead of forcing nested `<name>_gpkg|_sqlite/<name>.<ext>` paths.
+- Update Create Database save gating in `version/RetryDownloadFailures-src/resources/ssurgo_portal_scripts.js` to validate selected parent folder accessibility and block only when the target database file already exists.
 
 ## [1.0.0.117] - 2026-06-05
 - Improve first-run download speed with adaptive upload concurrency while preserving save-step stability in `version/RetryDownloadFailures-src/resources/ssa-downloader.mjs`.

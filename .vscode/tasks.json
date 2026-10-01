@@ -1,0 +1,19 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "SSURGO: Full End-to-End Smoke",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/skills/session-ops/scripts/run_end_to_end_smoke.ps1"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    }
+  ]
+}

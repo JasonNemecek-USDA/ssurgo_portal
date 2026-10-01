@@ -46,6 +46,7 @@ webpage = Bottle()
 JS_MIME_TYPE = "text/javascript"
 CSS_MIME_TYPE = "text/css; charset=UTF-8"
 SVG_MIME_TYPE = "image/svg+xml"
+APP_JSON_MIME_TYPE = "application/json"
 RESOURCE_SUFFIX = "/resources/"
 
 
@@ -62,6 +63,27 @@ def _static_content_type(filename):
 
     guessed_mimetype, _ = mimetypes.guess_type(lower_name)
     return guessed_mimetype or "application/octet-stream"
+
+
+def _set_no_cache_headers():
+    """Force UI assets to refresh so users get current client-side fixes."""
+    response.set_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+    response.set_header('Pragma', 'no-cache')
+    response.set_header('Expires', '0')
+
+
+def _set_cors_headers():
+    """Allow localhost/[::1] browser clients to call API routes without preflight failures."""
+    origin = request.get_header('Origin')
+    if origin:
+        response.set_header('Access-Control-Allow-Origin', origin)
+        response.set_header('Vary', 'Origin')
+    else:
+        response.set_header('Access-Control-Allow-Origin', '*')
+
+    response.set_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    response.set_header('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With')
+    response.set_header('Access-Control-Max-Age', '86400')
 
 
 class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
@@ -115,21 +137,86 @@ def default_converter(o):
         return o.isoformat()
 
 
+def _write_tlogger_message(msg_type, msg_txt):
+    normalized_type = str(msg_type or 'info').strip().lower()
+    normalized_text = str(msg_txt or '')
+
+    if normalized_type == 'debug':
+        tlogger.debug(normalized_text)
+    elif normalized_type == 'warning':
+        tlogger.warning(normalized_text)
+    elif normalized_type == 'error':
+        tlogger.error(normalized_text)
+    elif normalized_type == 'critical':
+        tlogger.critical(normalized_text)
+    # Gets both 'info' messages and any incorrectly formatted msgTypes.
+    else:
+        normalized_type = 'info'
+        tlogger.info(normalized_text)
+
+    return normalized_type
+
+
+def _build_tlogger_message(message, source=None, context=None):
+    message_text = str(message or '')
+    metadata_parts = []
+
+    if isinstance(source, str) and source.strip():
+        metadata_parts.append(f"source={source.strip()}")
+
+    if context is not None:
+        try:
+            context_text = json.dumps(
+                context,
+                default=default_converter,
+                ensure_ascii=False,
+            )
+        except TypeError:
+            context_text = str(context)
+        metadata_parts.append(f"context={context_text}")
+
+    if not metadata_parts:
+        return message_text
+
+    metadata_text = '; '.join(metadata_parts)
+    if message_text:
+        return f"{message_text} ({metadata_text})"
+
+    return metadata_text
+
+
 # ----------------------------------- Bottle Route methods -------------------
+@webpage.post('/tlogger')
+def post_log_payload():
+    _set_cors_headers()
+    payload = request.json if isinstance(request.json, dict) else {}
+    msg_type = payload.get('level')
+    msg_txt = _build_tlogger_message(
+        payload.get('message'),
+        source=payload.get('source'),
+        context=payload.get('context'),
+    )
+    normalized_type = _write_tlogger_message(msg_type, msg_txt)
+
+    response.content_type = APP_JSON_MIME_TYPE
+    return json.dumps({
+        'success': True,
+        'level': normalized_type,
+        'messageLength': len(msg_txt),
+    })
+
+
+@webpage.route('/tlogger', method='OPTIONS')
+def tlogger_options():
+    _set_cors_headers()
+    response.status = 204
+    return ''
+
+
 @webpage.route('/tlogger/<logmsg>')
 def post_log(logmsg):
     msg_type, _, msg_txt = logmsg.partition(':')
-    if msg_type == 'debug':
-        tlogger.debug(msg_txt)
-    elif msg_type == 'warning':
-        tlogger.warning(msg_txt)
-    elif msg_type == 'error':
-        tlogger.error(msg_txt)
-    elif msg_type == 'critical':
-        tlogger.critical(msg_txt)
-    # Gets both 'info' messages and any incorrectly formatted msgTypes.
-    else:
-        tlogger.info(msg_txt or logmsg)
+    _write_tlogger_message(msg_type, msg_txt or logmsg)
 
 
 @webpage.get('/checkInternet')
@@ -215,7 +302,7 @@ def get_version():
 
 @webpage.get('/getVersionInfoLocal')
 def get_version_info_local():
-    response.content_type = 'application/json'
+    response.content_type = APP_JSON_MIME_TYPE
     return json.dumps(config.get("versionInformation"))
 
 
@@ -232,6 +319,8 @@ def get_startup_info():
 def display_ssurgo_portal_ui():
     # Keep UI-facing version text/cookies in sync even when users load this route directly.
     check_version_info()
+    _set_no_cache_headers()
+    _set_cors_headers()
     if config.isPyzFile:
         rendered_ssurgo_portal_ui = render_template(ssurgo_portal_ui)
         return rendered_ssurgo_portal_ui
@@ -246,8 +335,16 @@ def display_ssurgo_portal_ui():
 
 @webpage.post('/SSURGOPortalUI')
 def ssurgo_portal_ui_request():
+    _set_cors_headers()
     result = dispatch.Dispatch.dispatch(request.json)
     return result
+
+
+@webpage.route('/SSURGOPortalUI', method='OPTIONS')
+def ssurgo_portal_ui_options():
+    _set_cors_headers()
+    response.status = 204
+    return ''
 
 
 @webpage.post('/bulkssadownload')
@@ -286,7 +383,7 @@ def default_download_folder():
 
 @webpage.get('/runtimeTelemetry')
 def runtime_telemetry():
-    response.content_type = 'application/json'
+    response.content_type = APP_JSON_MIME_TYPE
     return json.dumps(_collect_runtime_telemetry())
 
 
@@ -296,6 +393,16 @@ def create_download_folder():
     parent = payload.get('parent')
     folder_name = payload.get('folderName')
     return json.dumps(_create_download_folder(parent, folder_name))
+
+
+@webpage.post('/deleteDatabaseFolder')
+def delete_database_folder():
+    payload = request.json if isinstance(request.json, dict) else {}
+    target_path = payload.get('path')
+    result = _delete_database_folder(target_path)
+    response.status = result.pop('statusCode', 200)
+    response.content_type = APP_JSON_MIME_TYPE
+    return json.dumps(result)
 
 
 def _validate_download_folder(location):
@@ -541,6 +648,71 @@ def _create_download_folder(parent_location, folder_name):
     return validation
 
 
+def _delete_database_folder(folder_path):
+    if not isinstance(folder_path, str) or not folder_path.strip():
+        return {
+            'success': False,
+            'message': 'Select a database folder before deleting.',
+            'statusCode': 400,
+        }
+
+    normalized_folder = os.path.abspath(folder_path.strip())
+    if _is_root_folder(normalized_folder):
+        return {
+            'success': False,
+            'message': 'Refusing to delete a root folder.',
+            'statusCode': 400,
+        }
+
+    folder_name = os.path.basename(normalized_folder).lower()
+    if not (
+        folder_name.endswith('_gpkg')
+        or folder_name.endswith('_sqlite')
+    ):
+        return {
+            'success': False,
+            'message': (
+                'Delete is restricted to database folders ending in '
+                '_gpkg or _sqlite.'
+            ),
+            'statusCode': 400,
+        }
+
+    if not os.path.exists(normalized_folder):
+        return {
+            'success': False,
+            'message': f'Database folder does not exist: {normalized_folder}',
+            'statusCode': 404,
+        }
+
+    if not os.path.isdir(normalized_folder):
+        return {
+            'success': False,
+            'message': f'Database location is not a folder: {normalized_folder}',
+            'statusCode': 400,
+        }
+
+    try:
+        shutil.rmtree(normalized_folder)
+    except OSError as ex:
+        tlogger.error(
+            'Unable to delete database folder %s: %s',
+            normalized_folder,
+            ex,
+        )
+        return {
+            'success': False,
+            'message': f'Unable to delete database folder: {ex}',
+            'statusCode': 500,
+        }
+
+    return {
+        'success': True,
+        'path': normalized_folder,
+        'message': f'Deleted database folder: {normalized_folder}',
+    }
+
+
 def _validate_new_folder_name(folder_name):
     if not isinstance(folder_name, str) or not folder_name.strip():
         return (
@@ -682,8 +854,46 @@ def upload_blob():
     if location:
         filepath = os.path.join(location, filename)
 
-    result = _save_upload_stream(upload.file, filepath, overwrite == "1")
-    return json.dumps(result)
+    try:
+        result = _save_upload_stream(upload.file, filepath, overwrite == "1")
+        return json.dumps(result)
+    finally:
+        # Always close multipart temp streams created by Bottle/CGI.
+        _close_upload_file(upload)
+        _close_request_uploads(getattr(request, 'files', None))
+
+
+def _close_upload_file(upload):
+    if not upload:
+        return
+
+    try:
+        upload_stream = getattr(upload, 'file', None)
+    except (AttributeError, TypeError):
+        upload_stream = None
+
+    if upload_stream is not None:
+        try:
+            upload_stream.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _close_request_uploads(uploads):
+    if not uploads:
+        return
+
+    try:
+        upload_items = list(uploads.values())
+    except (AttributeError, TypeError):
+        return
+
+    for upload_item in upload_items:
+        if isinstance(upload_item, (list, tuple)):
+            for nested_upload in upload_item:
+                _close_upload_file(nested_upload)
+        else:
+            _close_upload_file(upload_item)
 
 
 def _save_upload_stream(upload_stream, filepath, overwrite):
@@ -710,7 +920,7 @@ def _save_upload_stream(upload_stream, filepath, overwrite):
         # Bottle stores uploads in temporary files; close them promptly.
         try:
             upload_stream.close()
-        except OSError:
+        except (OSError, ValueError):
             pass
 
     return {"success": True}
@@ -795,6 +1005,7 @@ def is_server_running():
 
 @webpage.post('/fileExists')
 def file_exists():
+    _set_cors_headers()
     if isinstance(request.json, list):
         requested_folders = request.json
     elif isinstance(request.json, str):
@@ -804,6 +1015,13 @@ def file_exists():
 
     failed_folders = _find_missing_folders(requested_folders)
     return json.dumps({"failedfolders": failed_folders})
+
+
+@webpage.route('/fileExists', method='OPTIONS')
+def file_exists_options():
+    _set_cors_headers()
+    response.status = 204
+    return ''
 
 
 def _find_missing_folders(requested_folders):
@@ -831,6 +1049,7 @@ def _find_missing_folders(requested_folders):
 
 @webpage.route('/static/<filename>')
 def server_static(filename):
+    _set_no_cache_headers()
     if config.isPyzFile:
         with ZipFile(zippath) as dpzip:
             try:
@@ -849,6 +1068,7 @@ def server_static(filename):
 
 @webpage.route('/static/js/<filename>')
 def server_static_js(filename):
+    _set_no_cache_headers()
     if config.isPyzFile:
         with ZipFile(zippath) as dpzip:
             with io.TextIOWrapper(
@@ -897,6 +1117,7 @@ def get_html_components(filename):
 
 @webpage.route('/static/SubComponents/JsComponents/<filename>')
 def get_html_components_scripts(filename):
+    _set_no_cache_headers()
     if config.isPyzFile:
         with ZipFile(zippath) as dpzip:
             with io.TextIOWrapper(
@@ -989,6 +1210,7 @@ def server_library(library, filename):
 
 @webpage.route('/leaflet/javascript/<filename>')
 def get_leaflet_javascript(filename):
+    _set_no_cache_headers()
     if config.isPyzFile:
         with ZipFile(zippath) as dpzip:
             with io.TextIOWrapper(
@@ -997,23 +1219,33 @@ def get_leaflet_javascript(filename):
             ) as templateResult:
                 content = templateResult.readlines()
                 plaintext = ''.join(content)
-            return plaintext
-    return static_file(filename, fullPath + "/resources/leaflet/javascript/")
+            response.body = plaintext
+            response.content_type = JS_MIME_TYPE
+            return response
+    return static_file(
+        filename,
+        fullPath + "/resources/leaflet/javascript/",
+        mimetype=JS_MIME_TYPE)
 
 
 @webpage.route("/leaflet/css/<filename>")
 def get_leaflet_css(filename):
+    _set_no_cache_headers()
     if config.isPyzFile:
         response.body = render_template('resources/leaflet/css/' + filename)
         response.content_type = CSS_MIME_TYPE
         return response
-    return static_file(filename, fullPath + "/resources/leaflet/css/")
+    return static_file(
+        filename,
+        fullPath + "/resources/leaflet/css/",
+        mimetype=CSS_MIME_TYPE)
 
 # USWDS Routes
 
 
 @webpage.route('/uswds/javascript/<filename>')
 def server_uswds_javascript(filename):
+    _set_no_cache_headers()
     if config.isPyzFile:
         with ZipFile(zippath) as dpzip:
             with io.TextIOWrapper(
@@ -1022,17 +1254,26 @@ def server_uswds_javascript(filename):
             ) as templateResult:
                 content = templateResult.readlines()
                 plaintext = ''.join(content)
-            return plaintext
-    return static_file(filename, fullPath + "/resources/uswds/javascript/")
+            response.body = plaintext
+            response.content_type = JS_MIME_TYPE
+            return response
+    return static_file(
+        filename,
+        fullPath + "/resources/uswds/javascript/",
+        mimetype=JS_MIME_TYPE)
 
 
 @webpage.route("/uswds/css/<filename>")
 def get_uswds_css(filename):
+    _set_no_cache_headers()
     if config.isPyzFile:
         response.body = render_template('resources/uswds/css/' + filename)
         response.content_type = CSS_MIME_TYPE
         return response
-    return static_file(filename, fullPath + "/resources/uswds/css/")
+    return static_file(
+        filename,
+        fullPath + "/resources/uswds/css/",
+        mimetype=CSS_MIME_TYPE)
 
 
 @webpage.route('/uswds/img/<filename>')
@@ -1127,14 +1368,21 @@ def run_server():
     bind_host = _resolve_bind_host()
     startup_url = _build_startup_url(bind_host)
 
-    # Keep server in the main thread so the process remains alive after startup.
-    threading.Thread(
-        target=webbrowser.open,
-        args=[
-            startup_url,
-            1,
-            True],
-        daemon=True).start()
+    if _should_open_browser_on_startup():
+        # Keep server in the main thread so the process remains alive
+        # after startup.
+        threading.Thread(
+            target=webbrowser.open,
+            args=[
+                startup_url,
+                1,
+                True],
+            daemon=True).start()
+    else:
+        tlogger.info(
+            "Browser launch skipped: SSURGO_LAUNCH_BROWSER "
+            "disables runtime auto-open."
+        )
 
     if config.isPyzFile:
         run(app=webpage, host=bind_host, port=8083, server=ThreadedWSGIRefServer)
@@ -1163,6 +1411,16 @@ def _build_startup_url(bind_host: str) -> str:
     if ':' in bind_host and not bind_host.startswith('['):
         host_for_url = f'[{bind_host}]'
     return f'http://{host_for_url}:8083/startUp'
+
+
+def _should_open_browser_on_startup() -> bool:
+    """Allow launch scripts to own browser startup and avoid duplicate tabs."""
+    launch_setting = os.environ.get("SSURGO_LAUNCH_BROWSER")
+    if launch_setting is None:
+        return True
+
+    normalized_setting = str(launch_setting).strip().lower()
+    return normalized_setting in ("1", "true", "yes", "on")
 
 
 def _resolve_bind_host() -> str:

@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sys
 import tempfile
@@ -28,6 +29,41 @@ class FakeResponse:
 
 
 class TestSSURGODownloader(unittest.TestCase):
+    def test_sapoly_refresh_failure_preserves_existing_file(self):
+        existing_data = {
+            "features": [
+                {"properties": {"saverest": "2025-01-01T00:00:00"}},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = os.path.join(temp_dir, "sapoly.geojson")
+            with open(file_path, "w", encoding="utf-8") as file:
+                json.dump(existing_data, file)
+
+            freshness_response = unittest.mock.Mock()
+            freshness_response.read.return_value = b'{"Table": [["2026-01-01"]]}'
+
+            with patch("dlcore.SSURGODownloader.config.isPyzFile", True), patch(
+                "dlcore.SSURGODownloader.sys.argv",
+                [os.path.join(temp_dir, "SSURGO_Portal.pyz")],
+            ), patch(
+                "dlcore.SSURGODownloader.urlopen",
+                return_value=freshness_response,
+            ), patch(
+                "dlcore.SSURGODownloader.urlretrieve",
+                side_effect=OSError("HTTP Error 400: Bad Request"),
+            ), patch("dlcore.SSURGODownloader.tlogger") as logger:
+                BulkDownloader.check_for_sapolygons()
+
+            with open(file_path, encoding="utf-8") as file:
+                self.assertEqual(json.load(file), existing_data)
+
+            self.assertFalse(os.path.exists(file_path + "_old"))
+            self.assertFalse(os.path.exists(file_path + ".download"))
+            logger.error.assert_not_called()
+            logger.warning.assert_called()
+
     def test_getdownload_detects_corrupt_zip(self):
         with tempfile.TemporaryDirectory() as output_dir:
             downloader = BulkDownloader(

@@ -84,7 +84,17 @@ class Dispatch:
 			# Key tests should all be lower case
 			requestKey = (request["request"]).lower()
 			tlogger.info(f'dispatch called with requestKey={requestKey} in {format(config.get("runmode"))}, next log record contains JSON request.')
-			fullRequest = json.dumps(request)
+			requestForLog = request
+			if requestKey in ("pretestimportcandidates", "importcandidates"):
+				subfolders = request.get("subfolders")
+				if isinstance(subfolders, list) and len(subfolders) > 200:
+					requestForLog = dict(request)
+					requestForLog["subfolders"] = {
+						"count": len(subfolders),
+						"sample": subfolders[:25],
+					}
+
+			fullRequest = json.dumps(requestForLog)
 			if requestKey == "logjavascripterror":
 				tlogger.error(fullRequest)
 			else:

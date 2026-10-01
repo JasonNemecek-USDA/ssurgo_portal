@@ -13,6 +13,85 @@ let downloadFolder
 const cpuThreads = self?.navigator?.hardwareConcurrency ?? 8
 let runTelemetry = null
 let telemetryIntervalId = null
+let requestedDownloadProfile = 'auto'
+let activeDownloadProfile = 'balanced'
+let activeProfileSettings = null
+let downloadUrlRefreshCache = new Map()
+
+const DOWNLOAD_PROFILE_SETTINGS = {
+    turbo: {
+        concurrencyScale: {pipeline: 1.2, upload: 1.15, localIo: 1.1},
+        minConcurrency: {pipeline: 6, upload: 2, localIo: 4},
+        startUploadRatio: 0.9,
+        retryUploadRatio: 0.8,
+        maxRefreshPasses: 2,
+        backpressureScale: 1.25,
+        uploadSuccessThreshold: 3,
+        metadataChunkSize: 320,
+        metadataChunkConcurrency: 4,
+    },
+    balanced: {
+        concurrencyScale: {pipeline: 1, upload: 1, localIo: 1},
+        minConcurrency: {pipeline: 4, upload: 1, localIo: 2},
+        startUploadRatio: 0.75,
+        retryUploadRatio: 0.75,
+        maxRefreshPasses: 3,
+        backpressureScale: 1,
+        uploadSuccessThreshold: 4,
+        metadataChunkSize: 250,
+        metadataChunkConcurrency: 3,
+    },
+    constrained: {
+        concurrencyScale: {pipeline: 0.58, upload: 0.55, localIo: 0.65},
+        minConcurrency: {pipeline: 2, upload: 1, localIo: 2},
+        startUploadRatio: 0.55,
+        retryUploadRatio: 0.65,
+        maxRefreshPasses: 4,
+        backpressureScale: 0.8,
+        uploadSuccessThreshold: 6,
+        metadataChunkSize: 180,
+        metadataChunkConcurrency: 2,
+    }
+}
+
+const DOWNLOAD_STAGE_POLICIES = {
+    turbo: {
+        sdaQuery: {attempts: 3, timeoutMs: 70000, retryDelayMs: 500, maxRetryDelayMs: 5000},
+        uploadForm: {
+            attempts: 3,
+            timeoutMs: 90000,
+            retryDelayMs: 450,
+            maxRetryDelayMs: 5000,
+            perMbTimeoutMs: 1200,
+            maxAdaptiveTimeoutMs: 210000,
+        },
+        unzipForm: {attempts: 2, timeoutMs: 150000, retryDelayMs: 400, maxRetryDelayMs: 3500},
+    },
+    balanced: {
+        sdaQuery: {attempts: 4, timeoutMs: 90000, retryDelayMs: 1000, maxRetryDelayMs: 8000},
+        uploadForm: {
+            attempts: 4,
+            timeoutMs: 120000,
+            retryDelayMs: 600,
+            maxRetryDelayMs: 7000,
+            perMbTimeoutMs: 1800,
+            maxAdaptiveTimeoutMs: 240000,
+        },
+        unzipForm: {attempts: 3, timeoutMs: 180000, retryDelayMs: 500, maxRetryDelayMs: 5000},
+    },
+    constrained: {
+        sdaQuery: {attempts: 6, timeoutMs: 180000, retryDelayMs: 1300, maxRetryDelayMs: 14000},
+        uploadForm: {
+            attempts: 6,
+            timeoutMs: 180000,
+            retryDelayMs: 1100,
+            maxRetryDelayMs: 12000,
+            perMbTimeoutMs: 2600,
+            maxAdaptiveTimeoutMs: 360000,
+        },
+        unzipForm: {attempts: 5, timeoutMs: 240000, retryDelayMs: 900, maxRetryDelayMs: 10000},
+    },
+}
 
 function getConcurrencyTargets(threads){
     const normalizedThreads = Number.isFinite(threads) && threads > 0
@@ -31,17 +110,128 @@ function getConcurrencyTargets(threads){
     return {pipeline: 40, upload: 12, localIo: 18}
 }
 
-const concurrencyTargets = getConcurrencyTargets(cpuThreads)
-const defaultPipelineConcurrency = concurrencyTargets.pipeline
-const defaultUploadConcurrency = concurrencyTargets.upload
-const defaultLocalIoConcurrency = concurrencyTargets.localIo
 const apiService = new apiServiceDef();
 const enableVerboseDownloadLogs = false
+
+function normalizeDownloadProfile(profileName){
+    const normalized = String(profileName ?? '').trim().toLowerCase()
+    if(normalized === 'auto' || normalized === 'turbo' || normalized === 'balanced' || normalized === 'constrained'){
+        return normalized
+    }
+
+    return 'auto'
+}
+
+function resolveAutoDownloadProfile(areaCount = 0){
+    const connection = self?.navigator?.connection
+    const effectiveType = String(connection?.effectiveType ?? '').toLowerCase()
+    const rtt = Number(connection?.rtt)
+    const downlink = Number(connection?.downlink)
+    const saveData = Boolean(connection?.saveData)
+
+    if(
+        saveData
+        || effectiveType.includes('2g')
+        || (Number.isFinite(rtt) && rtt >= 250)
+        || (Number.isFinite(downlink) && downlink > 0 && downlink <= 1.5)
+    ){
+        return 'constrained'
+    }
+
+    if(
+        effectiveType === '4g'
+        && Number.isFinite(downlink)
+        && downlink >= 20
+        && (!Number.isFinite(rtt) || rtt <= 90)
+        && areaCount <= 1500
+    ){
+        return 'turbo'
+    }
+
+    return 'balanced'
+}
+
+function resolveRunDownloadProfile(profileName, areaCount = 0){
+    const normalized = normalizeDownloadProfile(profileName)
+    if(normalized === 'auto'){
+        return resolveAutoDownloadProfile(areaCount)
+    }
+
+    return normalized
+}
+
+function getProfileSettings(profileName){
+    return DOWNLOAD_PROFILE_SETTINGS[profileName] ?? DOWNLOAD_PROFILE_SETTINGS.balanced
+}
+
+function getProfiledConcurrencyTargets(threads, profileSettings){
+    const settings = profileSettings ?? DOWNLOAD_PROFILE_SETTINGS.balanced
+    const baseTargets = getConcurrencyTargets(threads)
+    const concurrencyScale = settings.concurrencyScale ?? DOWNLOAD_PROFILE_SETTINGS.balanced.concurrencyScale
+    const minimums = settings.minConcurrency ?? DOWNLOAD_PROFILE_SETTINGS.balanced.minConcurrency
+
+    return {
+        pipeline: Math.max(minimums.pipeline, Math.round(baseTargets.pipeline * concurrencyScale.pipeline)),
+        upload: Math.max(minimums.upload, Math.round(baseTargets.upload * concurrencyScale.upload)),
+        localIo: Math.max(minimums.localIo, Math.round(baseTargets.localIo * concurrencyScale.localIo)),
+    }
+}
+
+function getStageRetryPolicy(stageName){
+    const profilePolicies = DOWNLOAD_STAGE_POLICIES[activeDownloadProfile] ?? DOWNLOAD_STAGE_POLICIES.balanced
+    const fallbackPolicies = DOWNLOAD_STAGE_POLICIES.balanced
+    return profilePolicies[stageName] ?? fallbackPolicies[stageName] ?? {}
+}
 
 function debugLog(...args){
     if(enableVerboseDownloadLogs){
         console.log(...args)
     }
+}
+
+function normalizeLogLevel(level){
+    const normalized = String(level ?? '').trim().toLowerCase()
+    if(
+        normalized === 'debug'
+        || normalized === 'info'
+        || normalized === 'warning'
+        || normalized === 'error'
+        || normalized === 'critical'
+    ){
+        return normalized
+    }
+
+    return 'info'
+}
+
+async function postLoggerMessage(level, message, context = null){
+    const normalizedLevel = normalizeLogLevel(level)
+    const payload = {
+        level: normalizedLevel,
+        message: String(message ?? ''),
+        source: 'ssa-downloader',
+    }
+
+    if(context != null){
+        payload.context = context
+    }
+
+    try{
+        const postResponse = await fetch('/tlogger', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+        })
+
+        if(postResponse.ok){
+            return
+        }
+    }
+    catch(_error){
+    }
+
+    const encodedMessage = encodeURIComponent(payload.message)
+    fetch(`/tlogger/${normalizedLevel}:${encodedMessage}`).catch(() => {})
 }
 
 function clearDownloadTelemetryInterval(){
@@ -57,6 +247,8 @@ function initializeRunTelemetry(areaCount, destination, overwrite){
         totalAreas: Number.isFinite(areaCount) ? areaCount : 0,
         destination: String(destination ?? ''),
         overwrite: Boolean(overwrite),
+        requestedProfile: requestedDownloadProfile,
+        activeProfile: activeDownloadProfile,
         retryQueued: 0,
         governorAdjustments: 0,
         backpressureActivations: 0,
@@ -115,6 +307,8 @@ async function emitRunTelemetry(stage, limit, uploadLimit, ioLimit){
         sequence: runTelemetry.sampleSequence,
         elapsedMs,
         totalAreas: runTelemetry.totalAreas,
+        requestedProfile: runTelemetry.requestedProfile,
+        activeProfile: runTelemetry.activeProfile,
         retryQueued: runTelemetry.retryQueued,
         governorAdjustments: runTelemetry.governorAdjustments,
         backpressureActivations: runTelemetry.backpressureActivations,
@@ -130,6 +324,7 @@ async function emitRunTelemetry(stage, limit, uploadLimit, ioLimit){
     const memoryPercent = runtime?.memoryPercent ?? 'na'
     const summary = (
         `downloadTelemetry stage=${stage}`
+        + ` profile=${telemetry.activeProfile}`
         + ` elapsedMs=${elapsedMs}`
         + ` totalAreas=${telemetry.totalAreas}`
         + ` retryQueued=${telemetry.retryQueued}`
@@ -141,7 +336,7 @@ async function emitRunTelemetry(stage, limit, uploadLimit, ioLimit){
         + ` cpuPct=${cpuPercent}`
         + ` memPct=${memoryPercent}`
     )
-    fetch(`/tlogger/info:${encodeURIComponent(summary)}`).catch(() => {})
+    postLoggerMessage('info', summary).catch(() => {})
 }
 
 function sleep(ms){
@@ -176,10 +371,11 @@ function postDownloadCancelled(reason = "user_cancelled", message = "Download ca
 }
 
 async function postSdaQueryWithRetry(queryText){
-    const attempts = 4
-    const timeoutMs = 90000
-    const retryDelayMs = 1000
-    const maxRetryDelayMs = 8000
+    const queryPolicy = getStageRetryPolicy('sdaQuery')
+    const attempts = queryPolicy.attempts ?? 4
+    const timeoutMs = queryPolicy.timeoutMs ?? 90000
+    const retryDelayMs = queryPolicy.retryDelayMs ?? 1000
+    const maxRetryDelayMs = queryPolicy.maxRetryDelayMs ?? 8000
 
     const getBackoffMs = (attemptNumber) => {
         const exponentialDelay = retryDelayMs * (2 ** (attemptNumber - 1))
@@ -253,6 +449,70 @@ function buildArchivePath(destination, fileName){
     return `${destination}\\${fileName}`
 }
 
+function getJsonByteLength(value){
+    const jsonValue = JSON.stringify(value)
+    if(typeof TextEncoder !== 'undefined'){
+        return new TextEncoder().encode(jsonValue).length
+    }
+    return jsonValue.length
+}
+
+function splitIntoFileCheckChunks(paths, maxJsonBytes = 80 * 1024){
+    const chunks = []
+    let currentChunk = []
+
+    for(const folderPath of paths){
+        if(currentChunk.length === 0){
+            currentChunk.push(folderPath)
+            continue
+        }
+
+        const candidateChunk = [...currentChunk, folderPath]
+        if(getJsonByteLength(candidateChunk) <= maxJsonBytes){
+            currentChunk.push(folderPath)
+            continue
+        }
+
+        chunks.push(currentChunk)
+        currentChunk = [folderPath]
+    }
+
+    if(currentChunk.length > 0){
+        chunks.push(currentChunk)
+    }
+
+    return chunks
+}
+
+async function collectMissingPathsFromFileExists(paths){
+    const missingSet = new Set()
+    const chunks = splitIntoFileCheckChunks(paths)
+
+    for(const chunk of chunks){
+        const response = await fetch('/fileExists', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(chunk),
+            signal
+        })
+
+        if(!response.ok){
+            return null
+        }
+
+        const payload = await response.json()
+        if(!payload || !Array.isArray(payload.failedfolders)){
+            return null
+        }
+
+        for(const failedFolder of payload.failedfolders){
+            missingSet.add(failedFolder)
+        }
+    }
+
+    return missingSet
+}
+
 async function splitExistingArchives(downloadFiles, destination, overwrite){
     if(overwrite || downloadFiles.length === 0){
         return {existingFiles: [], missingFiles: downloadFiles}
@@ -260,19 +520,11 @@ async function splitExistingArchives(downloadFiles, destination, overwrite){
 
     const archivePaths = downloadFiles.map(file => buildArchivePath(destination, file.fileName))
     try{
-        const response = await fetch('/fileExists', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(archivePaths),
-            signal
-        })
-
-        if(!response.ok){
+        const missingSet = await collectMissingPathsFromFileExists(archivePaths)
+        if(!missingSet){
             return {existingFiles: [], missingFiles: downloadFiles}
         }
 
-        const payload = await response.json()
-        const missingSet = new Set(payload?.failedfolders ?? [])
         const existingFiles = []
         const missingFiles = []
 
@@ -302,19 +554,11 @@ async function markFilesRequiringOverwrite(downloadFiles, destination, overwrite
 
     const areaFolderPaths = downloadFiles.map(file => buildArchivePath(destination, file.areaSymbol))
     try{
-        const response = await fetch('/fileExists', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(areaFolderPaths),
-            signal
-        })
-
-        if(!response.ok){
+        const missingSet = await collectMissingPathsFromFileExists(areaFolderPaths)
+        if(!missingSet){
             return downloadFiles
         }
 
-        const payload = await response.json()
-        const missingSet = new Set(payload?.failedfolders ?? [])
         return downloadFiles.map((file, index) => {
             const folderPath = areaFolderPaths[index]
             const areaExists = !missingSet.has(folderPath)
@@ -396,6 +640,24 @@ onmessage = async (event) => {
         cancel_reason = null;
         try{
             const dest = data.destination;
+            const areaSymbols = Array.isArray(data.areaSymbols) ? data.areaSymbols : [];
+            requestedDownloadProfile = normalizeDownloadProfile(data.downloadProfile)
+            activeDownloadProfile = resolveRunDownloadProfile(requestedDownloadProfile, areaSymbols.length)
+            activeProfileSettings = getProfileSettings(activeDownloadProfile)
+            apiService.setRetryProfile(activeDownloadProfile)
+            downloadUrlRefreshCache = new Map()
+
+            postMessage({
+                name: 'download-profile',
+                requestedProfile: requestedDownloadProfile,
+                activeProfile: activeDownloadProfile,
+            })
+
+            postLoggerMessage(
+                'info',
+                `download profile selected requested=${requestedDownloadProfile} active=${activeDownloadProfile}`
+            ).catch(() => {})
+
             const destinationValidation = await validateDestinationBeforeDownload(dest)
             if(!destinationValidation.success){
                 postMessage({
@@ -411,7 +673,6 @@ onmessage = async (event) => {
 
             downloadFolder = dest
             const overwrite = data.overwrite;
-            const areaSymbols = data.areaSymbols;
             await downloadSurveyAreas(areaSymbols, dest, overwrite);
             if(cancel_download){
                 postDownloadCancelled(cancel_reason || 'user_cancelled')
@@ -480,7 +741,7 @@ onmessage = async (event) => {
  * @param {[string]} areaSymbols - The area symbols to get the download URLs for.
  * @returns {Promise<[Object]>} - A promise that resolves to an array of objects containing the area symbol, area name, and file name for each area symbol.
  */
-async function getDownloadUrls(areaSymbols){
+async function getDownloadUrls(areaSymbols, options = {}){
     const normalizedAreaSymbols = Array.from(
         new Set(
             (Array.isArray(areaSymbols) ? areaSymbols : [])
@@ -488,9 +749,28 @@ async function getDownloadUrls(areaSymbols){
                 .filter((value) => value.length > 0)
         )
     )
+    const preferCache = options.preferCache !== false
 
     if(normalizedAreaSymbols.length === 0){
         return []
+    }
+
+    const cachedUrlsBySymbol = new Map()
+    const symbolsToLookup = []
+    for(const areaSymbol of normalizedAreaSymbols){
+        const cachedUrl = preferCache ? downloadUrlRefreshCache.get(areaSymbol) : null
+        if(cachedUrl){
+            cachedUrlsBySymbol.set(areaSymbol, cachedUrl)
+        }
+        else{
+            symbolsToLookup.push(areaSymbol)
+        }
+    }
+
+    if(symbolsToLookup.length === 0){
+        return normalizedAreaSymbols
+            .map((areaSymbol) => cachedUrlsBySymbol.get(areaSymbol))
+            .filter(Boolean)
     }
 
     const queryStatusMapChunk = async (chunk) => {
@@ -521,19 +801,63 @@ async function getDownloadUrls(areaSymbols){
         }
     }
 
-    const chunkSize = 250
+    const chunkSize = Math.max(
+        80,
+        Number(activeProfileSettings?.metadataChunkSize ?? DOWNLOAD_PROFILE_SETTINGS.balanced.metadataChunkSize)
+    )
+    const metadataChunkConcurrency = Math.max(
+        1,
+        Number(
+            activeProfileSettings?.metadataChunkConcurrency
+            ?? DOWNLOAD_PROFILE_SETTINGS.balanced.metadataChunkConcurrency
+            ?? 2
+        )
+    )
+
+    const symbolChunks = []
+    for(let index = 0; index < symbolsToLookup.length; index += chunkSize){
+        symbolChunks.push(symbolsToLookup.slice(index, index + chunkSize))
+    }
+
+    debugLog('Metadata URL lookup settings:', {
+        chunkSize,
+        metadataChunkConcurrency,
+        chunkCount: symbolChunks.length,
+    })
+
+    const metadataLimit = pLimit({
+        concurrency: metadataChunkConcurrency,
+        rejectOnClear: true,
+    })
+
+    const chunkTasks = symbolChunks.map((areaSymbolChunk) => {
+        return metadataLimit(async () => {
+            const chunkResponse = await fetchStatusMapChunk(areaSymbolChunk)
+            return Array.isArray(chunkResponse?.Table) ? chunkResponse.Table : []
+        })
+    })
+
     const sastatusmap_records = []
-    for(let index = 0; index < normalizedAreaSymbols.length; index += chunkSize){
-        const areaSymbolChunk = normalizedAreaSymbols.slice(index, index + chunkSize)
-        const chunkResponse = await fetchStatusMapChunk(areaSymbolChunk)
-        const records = Array.isArray(chunkResponse?.Table) ? chunkResponse.Table : []
+    const chunkResults = await Promise.all(chunkTasks)
+    for(const records of chunkResults){
         if(records.length > 0){
             sastatusmap_records.push(...records)
         }
     }
 
-    // print urls to download
-    return sastatusmap_records.map(rec => {return {areaSymbol: rec[0], areaName: rec[1], fileName: `wss_SSA_${rec[0]}_[${rec[2]}].zip`}})
+    for(const rec of sastatusmap_records){
+        const mappedRecord = {
+            areaSymbol: rec[0],
+            areaName: rec[1],
+            fileName: `wss_SSA_${rec[0]}_[${rec[2]}].zip`
+        }
+        cachedUrlsBySymbol.set(mappedRecord.areaSymbol, mappedRecord)
+        downloadUrlRefreshCache.set(mappedRecord.areaSymbol, mappedRecord)
+    }
+
+    return normalizedAreaSymbols
+        .map((areaSymbol) => cachedUrlsBySymbol.get(areaSymbol))
+        .filter(Boolean)
 }
 /**
  * This class represents a zip file for a soil survey area. It contains the area symbol, area name, file name, and blob data for the zip file. It also contains functions to read the zip file from WSS, save the zip file to the local machine, and unzip the file on the local machine. The reason for having this class is to keep all the information and functions related to the zip file in one place, which makes it easier to manage and maintain the code.
@@ -610,7 +934,7 @@ class AreaZipFile{
 
     async _downloadBlobByFileName(candidateFileName){
         const candidateUrl = `${WSS_DOWNLOAD_URL}${candidateFileName}`
-        this.blob = await apiService.getBlob(candidateUrl, signal)
+        this.blob = await apiService.getBlob(candidateUrl, signal, {policyKey: 'blobDownload'})
         this.fileName = candidateFileName
     }
 
@@ -682,13 +1006,21 @@ class AreaZipFile{
         params.push({name: 'location', value: destination});
         params.push({name: 'overwrite', value: overwrite ? '1' : '0'});
 
+        const uploadPolicy = getStageRetryPolicy('uploadForm')
         const blobSizeMb = Math.max(1, Math.ceil((this.blob?.size ?? 0) / (1024 * 1024)))
-        const adaptiveTimeoutMs = Math.min(240000, Math.max(90000, 60000 + (blobSizeMb * 2000)))
+        const baseUploadTimeoutMs = uploadPolicy.timeoutMs ?? 120000
+        const uploadTimeoutPerMbMs = uploadPolicy.perMbTimeoutMs ?? 1800
+        const maxAdaptiveTimeoutMs = uploadPolicy.maxAdaptiveTimeoutMs ?? 240000
+        const adaptiveTimeoutMs = Math.min(
+            maxAdaptiveTimeoutMs,
+            Math.max(baseUploadTimeoutMs, baseUploadTimeoutMs + (blobSizeMb * uploadTimeoutPerMbMs))
+        )
         const uploadRetryOptions = {
-            attempts: 4,
+            policyKey: 'uploadForm',
+            attempts: uploadPolicy.attempts ?? 4,
             timeoutMs: adaptiveTimeoutMs,
-            retryDelayMs: 500,
-            maxRetryDelayMs: 6000
+            retryDelayMs: uploadPolicy.retryDelayMs ?? 600,
+            maxRetryDelayMs: uploadPolicy.maxRetryDelayMs ?? 7000
         }
 
         return await apiService.postFormData(UPLOAD_URL, params, signal, uploadRetryOptions)
@@ -739,12 +1071,15 @@ class AreaZipFile{
         params.push({name: 'location', value: destination});
         params.push({name: 'overwrite', value: overwrite ? 1 : 0});
 
+        const unzipPolicy = getStageRetryPolicy('unzipForm')
+
         // Local unzip should fail fast enough to avoid long perceived stalls.
         const unzipRetryOptions = {
-            attempts: 3,
-            timeoutMs: 180000,
-            retryDelayMs: 500,
-            maxRetryDelayMs: 4000
+            policyKey: 'unzipForm',
+            attempts: unzipPolicy.attempts ?? 3,
+            timeoutMs: unzipPolicy.timeoutMs ?? 180000,
+            retryDelayMs: unzipPolicy.retryDelayMs ?? 500,
+            maxRetryDelayMs: unzipPolicy.maxRetryDelayMs ?? 4000
         }
 
         return await apiService.postFormData(UNZIP_URL, params, signal, unzipRetryOptions)
@@ -807,24 +1142,39 @@ class AreaZipFile{
  * @returns Promise
  */
 async function downloadSurveyAreas(areaSymbols, destination, overwrite){
+    if(!activeProfileSettings){
+        activeProfileSettings = getProfileSettings(activeDownloadProfile)
+    }
+
+    const profiledTargets = getProfiledConcurrencyTargets(cpuThreads, activeProfileSettings)
     const maxConcurrentRequests = Math.min(
-        defaultPipelineConcurrency,
-        Math.max(4, areaSymbols.length)
+        profiledTargets.pipeline,
+        Math.max(activeProfileSettings.minConcurrency.pipeline, areaSymbols.length)
     )
     const maxConcurrentLocalOps = Math.min(
-        defaultLocalIoConcurrency,
+        profiledTargets.localIo,
         maxConcurrentRequests
     )
     const maxConcurrentUploads = Math.min(
-        defaultUploadConcurrency,
+        profiledTargets.upload,
         maxConcurrentLocalOps
     )
-    const minPipelineConcurrency = Math.max(4, Math.min(8, maxConcurrentRequests))
-    const minLocalIoConcurrency = Math.max(2, Math.min(6, maxConcurrentLocalOps))
-    const minUploadConcurrency = Math.max(1, Math.min(2, maxConcurrentUploads))
+    const minPipelineConcurrency = Math.max(
+        activeProfileSettings.minConcurrency.pipeline,
+        Math.min(8, maxConcurrentRequests)
+    )
+    const minLocalIoConcurrency = Math.max(
+        activeProfileSettings.minConcurrency.localIo,
+        Math.min(6, maxConcurrentLocalOps)
+    )
+    const minUploadConcurrency = Math.max(
+        activeProfileSettings.minConcurrency.upload,
+        Math.min(2, maxConcurrentUploads)
+    )
+    const startUploadRatio = Number(activeProfileSettings.startUploadRatio ?? 0.75)
     const startUploadConcurrency = Math.max(
         minUploadConcurrency,
-        Math.min(maxConcurrentUploads, Math.max(4, Math.ceil(maxConcurrentUploads * 0.75)))
+        Math.min(maxConcurrentUploads, Math.max(1, Math.ceil(maxConcurrentUploads * startUploadRatio)))
     )
 
     const limit = pLimit({concurrency: maxConcurrentRequests, rejectOnClear: true})
@@ -907,7 +1257,7 @@ async function downloadSurveyAreas(areaSymbols, destination, overwrite){
             + ` message=${message}`
         )
         const logLevelPrefix = severity === 'warning' ? 'warning' : 'info'
-        fetch(`/tlogger/${logLevelPrefix}:${encodeURIComponent(summary)}`).catch(() => {})
+        postLoggerMessage(logLevelPrefix, summary).catch(() => {})
     }
 
     const applyConcurrencyTargets = (
@@ -1092,14 +1442,33 @@ async function downloadSurveyAreas(areaSymbols, destination, overwrite){
         }
     }
 
+    const pauseForRecovery = (delayMs) => {
+        const ms = Number.isFinite(delayMs) ? Math.max(0, delayMs) : 0
+        return new Promise((resolve) => setTimeout(resolve, ms))
+    }
+
+    const isTransientNetworkFailure = (error) => {
+        const message = String(error?.message ?? '').toLowerCase()
+        return (
+            error instanceof TypeError
+            || message.includes('failed to fetch')
+            || message.includes('networkerror')
+            || message.includes('timed out')
+            || message.includes('timeout')
+            || message.includes('load failed')
+        )
+    }
+
     const getPipelineBackpressureCapacity = () => {
+        const backpressureScale = Number(activeProfileSettings?.backpressureScale ?? 1)
         const dynamicCapacity = (limit.concurrency * 3) + (uploadLimit.concurrency * 2) + ioLimit.concurrency
-        return Math.max(20, dynamicCapacity)
+        return Math.max(12, Math.floor(dynamicCapacity * backpressureScale))
     }
 
     const getIoBackpressureCapacity = () => {
+        const backpressureScale = Number(activeProfileSettings?.backpressureScale ?? 1)
         const dynamicCapacity = (ioLimit.concurrency * 3) + uploadLimit.concurrency
-        return Math.max(12, dynamicCapacity)
+        return Math.max(8, Math.floor(dynamicCapacity * backpressureScale))
     }
 
     const logBackpressureSignal = (stage, trackedCount, capacity) => {
@@ -1155,7 +1524,8 @@ async function downloadSurveyAreas(areaSymbols, destination, overwrite){
 
     const increaseUploadConcurrency = () => {
         uploadSuccessStreak += 1
-        if(uploadSuccessStreak < 4){
+        const successThreshold = Math.max(2, Number(activeProfileSettings?.uploadSuccessThreshold ?? 4))
+        if(uploadSuccessStreak < successThreshold){
             return
         }
 
@@ -1191,6 +1561,7 @@ async function downloadSurveyAreas(areaSymbols, destination, overwrite){
     }, 5000)
 
     unfinishedAreasymbols = areaSymbols
+    let pipelineErrorStreak = 0
 
     const runExistingArchiveBatch = async (filesToUnzip, reportFailure) => {
         const retryFiles = []
@@ -1320,6 +1691,8 @@ async function downloadSurveyAreas(areaSymbols, destination, overwrite){
                         noteRetryQueued(1)
                         retryFiles.push(file)
                     }
+
+                    pipelineErrorStreak = Math.max(0, pipelineErrorStreak - 1)
                 }
                 catch(error){
                     if(isUserCancelledError(error)){
@@ -1327,6 +1700,33 @@ async function downloadSurveyAreas(areaSymbols, destination, overwrite){
                     }
 
                     console.error("Download pipeline error:", error?.message ?? error)
+
+                    if(isTransientNetworkFailure(error)){
+                        pipelineErrorStreak += 1
+
+                        if(pipelineErrorStreak >= 3){
+                            applyConcurrencyTargets(
+                                {
+                                    pipeline: limit.concurrency - 2,
+                                    upload: uploadLimit.concurrency - 2,
+                                    io: ioLimit.concurrency - 1,
+                                },
+                                {
+                                    reason: 'network_fetch_failure_scale_down',
+                                    severity: 'warning',
+                                    message: `Transient network fetch failures observed (streak=${pipelineErrorStreak}); reducing concurrency and backing off.`,
+                                    source: 'network-recovery',
+                                }
+                            )
+
+                            const recoveryDelayMs = Math.min(5000, 350 + (pipelineErrorStreak * 150))
+                            await pauseForRecovery(recoveryDelayMs)
+                        }
+                    }
+                    else{
+                        pipelineErrorStreak = Math.max(0, pipelineErrorStreak - 1)
+                    }
+
                     await runAdaptiveGovernorCycle('pipeline-error')
                     if(reportFailure){
                         postMessage({
@@ -1375,7 +1775,7 @@ async function downloadSurveyAreas(areaSymbols, destination, overwrite){
             return []
         }
 
-        const refreshedFiles = await getDownloadUrls(failedAreaSymbols)
+        const refreshedFiles = await getDownloadUrls(failedAreaSymbols, {preferCache: true})
         if(!Array.isArray(refreshedFiles) || refreshedFiles.length === 0){
             return failedFiles
         }
@@ -1432,13 +1832,14 @@ async function downloadSurveyAreas(areaSymbols, destination, overwrite){
 
         let pendingRetryFiles = retryUrls.concat(secondaryRetryUrls)
         if(pendingRetryFiles.length > 0){
+            const retryUploadRatio = Number(activeProfileSettings?.retryUploadRatio ?? 0.75)
             const retryUploadConcurrency = Math.max(
                 minUploadConcurrency,
-                Math.min(maxConcurrentUploads, Math.ceil(startUploadConcurrency * 0.75))
+                Math.min(maxConcurrentUploads, Math.ceil(startUploadConcurrency * retryUploadRatio))
             )
             uploadLimit.concurrency = retryUploadConcurrency
 
-            const maxRefreshPasses = 3
+            const maxRefreshPasses = Math.max(1, Number(activeProfileSettings?.maxRefreshPasses ?? 3))
             for(let pass = 1; pass <= maxRefreshPasses && pendingRetryFiles.length > 0; pass++){
                 throwIfCancelled()
                 const refreshedRetryFiles = await refreshDownloadFilesForRetry(pendingRetryFiles)

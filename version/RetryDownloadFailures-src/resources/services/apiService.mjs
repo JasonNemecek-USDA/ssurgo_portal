@@ -1,4 +1,62 @@
+const RETRY_PROFILE_POLICIES = {
+  turbo: {
+    blobDownload: {attempts: 3, timeoutMs: 900000, retryDelayMs: 450, maxRetryDelayMs: 4500},
+    formPost: {attempts: 5, timeoutMs: 420000, retryDelayMs: 500, maxRetryDelayMs: 7000},
+    uploadForm: {attempts: 3, timeoutMs: 90000, retryDelayMs: 450, maxRetryDelayMs: 5000},
+    unzipForm: {attempts: 2, timeoutMs: 150000, retryDelayMs: 400, maxRetryDelayMs: 3500}
+  },
+  balanced: {
+    blobDownload: {attempts: 4, timeoutMs: 1200000, retryDelayMs: 800, maxRetryDelayMs: 8000},
+    formPost: {attempts: 6, timeoutMs: 600000, retryDelayMs: 800, maxRetryDelayMs: 10000},
+    uploadForm: {attempts: 4, timeoutMs: 120000, retryDelayMs: 600, maxRetryDelayMs: 7000},
+    unzipForm: {attempts: 3, timeoutMs: 180000, retryDelayMs: 500, maxRetryDelayMs: 5000}
+  },
+  constrained: {
+    blobDownload: {attempts: 6, timeoutMs: 1800000, retryDelayMs: 1200, maxRetryDelayMs: 14000},
+    formPost: {attempts: 8, timeoutMs: 720000, retryDelayMs: 1200, maxRetryDelayMs: 16000},
+    uploadForm: {attempts: 6, timeoutMs: 180000, retryDelayMs: 1000, maxRetryDelayMs: 12000},
+    unzipForm: {attempts: 5, timeoutMs: 240000, retryDelayMs: 900, maxRetryDelayMs: 10000}
+  }
+};
+
 export default class ApiService {
+    retryProfile = 'balanced';
+
+    coercePositiveInt(value, fallback){
+      const parsed = Number.parseInt(value, 10);
+      if(Number.isFinite(parsed) && parsed > 0){
+        return parsed;
+      }
+
+      return fallback;
+    }
+
+    resolveRetryProfile(profileName){
+      const normalized = String(profileName ?? '').trim().toLowerCase();
+      if(normalized === 'turbo' || normalized === 'constrained' || normalized === 'balanced'){
+        return normalized;
+      }
+
+      return 'balanced';
+    }
+
+    setRetryProfile(profileName){
+      this.retryProfile = this.resolveRetryProfile(profileName);
+    }
+
+    getRetryOptions(policyKey, options = {}){
+      const selectedProfile = this.resolveRetryProfile(options.profileName ?? this.retryProfile);
+      const profilePolicies = RETRY_PROFILE_POLICIES[selectedProfile] ?? RETRY_PROFILE_POLICIES.balanced;
+      const policyName = String(policyKey ?? 'formPost');
+      const selectedPolicy = profilePolicies[policyName] ?? profilePolicies.formPost;
+
+      return {
+        attempts: this.coercePositiveInt(options.attempts, selectedPolicy.attempts),
+        timeoutMs: this.coercePositiveInt(options.timeoutMs, selectedPolicy.timeoutMs),
+        retryDelayMs: this.coercePositiveInt(options.retryDelayMs, selectedPolicy.retryDelayMs),
+        maxRetryDelayMs: this.coercePositiveInt(options.maxRetryDelayMs, selectedPolicy.maxRetryDelayMs),
+      };
+    }
 
     sleep(ms){
       return new Promise((resolve) => setTimeout(resolve, ms));
@@ -29,11 +87,12 @@ export default class ApiService {
       return response.body.getReader();
     }
 
-    async getBlob(endpoint, signal){
-      const attempts = 4;
-      const timeoutMs = 150000;
-      const retryDelayMs = 800;
-      const maxRetryDelayMs = 8000;
+    async getBlob(endpoint, signal, options = {}){
+      const retryOptions = this.getRetryOptions(options.policyKey ?? 'blobDownload', options);
+      const attempts = retryOptions.attempts;
+      const timeoutMs = retryOptions.timeoutMs;
+      const retryDelayMs = retryOptions.retryDelayMs;
+      const maxRetryDelayMs = retryOptions.maxRetryDelayMs;
 
       const getBackoffMs = (attemptNumber) => {
         const exponentialDelay = retryDelayMs * (2 ** (attemptNumber - 1));
@@ -67,7 +126,9 @@ export default class ApiService {
         }
         catch(error){
           const userAborted = Boolean(signal?.aborted);
-          const timedOutAbort = error?.name === 'AbortError' && !userAborted;
+          const timedOutAbort = (
+            error?.name === 'AbortError' || error?.name === 'TimeoutError'
+          ) && !userAborted;
           const errorMessage = String(error?.message ?? '').toLowerCase();
           const failedFetch =
             error instanceof TypeError ||
@@ -135,10 +196,11 @@ export default class ApiService {
     // }    
 
     async postFormData(endpoint, params, signal, options = {}) {
-      const attempts = options.attempts ?? 6;
-      const timeoutMs = options.timeoutMs ?? 600000; // 10 minutes
-      const retryDelayMs = options.retryDelayMs ?? 800;
-      const maxRetryDelayMs = options.maxRetryDelayMs ?? 10000;
+      const retryOptions = this.getRetryOptions(options.policyKey ?? 'formPost', options);
+      const attempts = retryOptions.attempts;
+      const timeoutMs = retryOptions.timeoutMs;
+      const retryDelayMs = retryOptions.retryDelayMs;
+      const maxRetryDelayMs = retryOptions.maxRetryDelayMs;
 
       const getBackoffMs = (attemptNumber) => {
         const exponentialDelay = retryDelayMs * (2 ** (attemptNumber - 1));
@@ -183,11 +245,15 @@ export default class ApiService {
           return await response.json();
         } catch (error) {
           const userAborted = Boolean(signal?.aborted);
-          const timedOutAbort = error?.name === 'AbortError' && !userAborted;
+          const timedOutAbort = (
+            error?.name === 'AbortError' || error?.name === 'TimeoutError'
+          ) && !userAborted;
           const errorMessage = String(error?.message ?? '').toLowerCase();
           const failedFetch =
             error instanceof TypeError ||
-            errorMessage.includes('failed to fetch');
+            errorMessage.includes('failed to fetch') ||
+            errorMessage.includes('networkerror') ||
+            errorMessage.includes('timed out');
           const canRetry = (timedOutAbort || failedFetch) && attempt < attempts;
 
           if (userAborted) {

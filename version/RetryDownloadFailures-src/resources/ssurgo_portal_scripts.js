@@ -118,6 +118,13 @@ const getSDVAttributesByFolderRequest = 'getsdvattributesbyfolder'
 const getSDVRatingOptions = 'getsdvratingoptions'
 const generateAggregationRequest = 'generateaggregation'
 const bulkSSADownload = 'bulkssadownload'
+const importStateFilterAllValue = '__ALL_STATES__'
+const importDbFilterAllValue = '__ALL_DB_STATUS__'
+const importDbFilterExistsValue = 'in-database'
+const importDbFilterMissingValue = 'not-in-database'
+const importSearchTextCache = new WeakMap()
+const createDatabaseParentFolderStorageKey = 'createDatabaseParentFolder'
+const databaseDeleteCheckboxClass = 'databaseDeleteCheckbox'
 
 
 //Variables for paths
@@ -132,6 +139,7 @@ var rootPath
 var overwriteChecked = false
 var duplicateSSAs = {}
 var aggregationRuleResponse
+var selectedDatabaseFolderForDelete = ''
 
 function setDatabaseNameAndPath(name, path, databasefunctions = DatabaseFunctions, rasterfunctions = RasterFunctions){
     databasefunctions.databasePath = path
@@ -142,8 +150,38 @@ function setDatabaseNameAndPath(name, path, databasefunctions = DatabaseFunction
 }
 
 function sendLoggerWarning(message){
-    const encodedMessage = encodeURIComponent(String(message ?? 'Unknown warning'))
-    return fetch(`/tlogger/warning:${encodedMessage}`).catch(() => {})
+    const warningMessage = String(message ?? 'Unknown warning')
+    return fetch('/tlogger', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            level: 'warning',
+            message: warningMessage,
+            source: 'ssurgo_portal_scripts',
+        }),
+    })
+        .then((loggerResponse) => {
+            if(loggerResponse.ok){
+                return loggerResponse
+            }
+
+            throw new Error(`logger post failed with status ${loggerResponse.status}`)
+        })
+        .catch(() => {
+            const encodedMessage = encodeURIComponent(warningMessage)
+            return fetch(`/tlogger/warning:${encodedMessage}`).catch(() => {})
+        })
+}
+
+function getSendDataTimeoutMs(requestTag){
+    switch(String(requestTag ?? '')){
+    case pretestImportCandidatesRequest:
+        return 60 * 1000
+    case getFolderTreeRequest:
+        return 60 * 1000
+    default:
+        return 2 * 60 * 1000
+    }
 }
 /**Main function for communicating with the server*/
 async function sendData(data){
@@ -151,10 +189,9 @@ async function sendData(data){
     let request = data?.request
     let returnedResponse
     const requestTag = String(request ?? 'unknown-request')
-    //Without a timeout set in code, browsers will enforce their own server request timeouts (bahavoir isn't consistent, though)
-    //This code sets a timeout limit that is hopefully larger than what any process may need to complete.
+    const timeoutMs = getSendDataTimeoutMs(requestTag)
     const controller = new AbortController();
-    const timeoutID = setTimeout(() => controller.abort(), 200000000); //in milliseconds (~55.5 hours)
+    const timeoutID = setTimeout(() => controller.abort(), timeoutMs)
 
     try {
         const response = await fetch(url, {
@@ -169,6 +206,7 @@ async function sendData(data){
         }
 
         const responseData = await response.json()
+        hideServerClosedModalIfVisible()
 
         try{
             //This can probably be separated into a separate method
@@ -192,28 +230,15 @@ async function sendData(data){
                 }
             }
             else if(request == pretestImportCandidatesRequest){
-                getTotalFolders(responseData.subfolders)
-                setErrorToggleDisplay()
-                importTable.data = responseData.subfolders
+                importTable.unfilteredData = Array.isArray(responseData?.subfolders) ? responseData.subfolders : []
+                importTable.data = importTable.unfilteredData
                 if (DatabaseFunctions) {
                     DatabaseFunctions.importTable = importTable 
                     DatabaseFunctions.folderPath = folderPath
                 }
-                buildImportTable()
                 setFolderName(folderPath)
-                if(importTable.errorFolders > 0){
-                    document.getElementById('toggleErrorDiv').removeAttribute('style')
-                }
-                else{
-                    document.getElementById('toggleErrorDiv').setAttribute('style', 'display: none')
-                }
-                if(Object.keys(duplicateSSAs).length > 0){
-                    document.getElementById('toggleDuplicateDiv').removeAttribute('style')
-                }
-                else{
-                    document.getElementById('toggleDuplicateDiv').setAttribute('style', 'display: none')
-                }
-                setDuplicateToggleDisplay()
+                resetImportFilterControls(importTable.unfilteredData)
+                applyImportTableFilters({resetSelection: false})
             }
             else if(request == createTemplateDatabaseRequest){
                 databasePath = responseData.path
@@ -252,23 +277,25 @@ async function sendData(data){
                 if(requestLocation == databaseTreeViewTableId){
                     //Builds out the tree view for selecting a database
                     let search = document.getElementById("databaseSearchText")
-                    search.setAttribute('onchange', `executeFolderTreeRequest('${databaseTreeViewTable.tableId}', "${rootPath}", true, updatedValue('databaseSearchText'))`)
+                    search.setAttribute('onchange', `executeFolderTreeRequest('${databaseTreeViewTable.tableId}', "${rootPath}", true, updatedValue('databaseSearchText'), false, true)`)
                     databaseTreeViewTable.data = responseData.nodes
                     databaseTreeViewTable.populateTreeViewTable()
                 }
                 else if(requestLocation == importTreeViewTableId){
                     //Builds out the tree view to select an SSA parent folder
                     let search = document.getElementById("ssaSearchTextbox") //Set the id of the search bar.
-                    search.setAttribute('onchange', `executeFolderTreeRequest('${importTreeViewTable.tableId}', "${rootPath}", false, updatedValue('ssaSearchTextbox'))`)
+                    search.setAttribute('onchange', `executeFolderTreeRequest('${importTreeViewTable.tableId}', "${rootPath}", false, updatedValue('ssaSearchTextbox'), false, true)`)
                     importTreeViewTable.data = responseData.nodes
                     importTreeViewTable.populateTreeViewTable()
                     importTreeViewTable.treeViewContainsSsurgo("hasSsurgoDataMessage")
-                    $("#selectSsurgoFolderFinalizeBtn").on("click", () => {ImportActivities.selectSSAParentFolder(rootPath)})
+                    $("#selectSsurgoFolderFinalizeBtn")
+                        .off("click.importSelectSsa")
+                        .on("click.importSelectSsa", () => {ImportActivities.selectSSAParentFolder(rootPath)})
                 }
                 else if(requestLocation == downloadTreeViewTableId){
                     //Builds out the tree view to select a download folder
                     let search = document.getElementById("downloadSearchTextbox") //Set the id of the search bar.
-                    search.setAttribute('onchange', `executeFolderTreeRequest('${downloadTreeViewTable.tableId}', "${rootPath}", false, updatedValue('downloadSearchTextbox'))`)
+                    search.setAttribute('onchange', `executeFolderTreeRequest('${downloadTreeViewTable.tableId}', "${rootPath}", false, updatedValue('downloadSearchTextbox'), false, true)`)
                     downloadTreeViewTable.data = responseData.nodes
                     downloadTreeViewTable.populateTreeViewTable()
                     downloadTreeViewTable.treeViewContainsSsurgo("hasSsurgoDataMessage")
@@ -295,19 +322,46 @@ async function sendData(data){
     }
     catch(err){
         if (err?.name === 'AbortError') {
-            sendLoggerWarning(`sendData timed out for ${requestTag}`)
+            sendLoggerWarning(`sendData timed out for ${requestTag} after ${timeoutMs}ms`)
         }
         else{
             const warningMessage = String(err?.message ?? err)
             sendLoggerWarning(`sendData failed for ${requestTag} - ${warningMessage}`)
         }
-        //The message in the Modal below only covers one error scenario. Other error Modals are needed.
-        $('#serverClosedModal').modal("show")
+
+        const serverAvailable = await confirmServerAvailability(1, 0, false)
+        if(!serverAvailable){
+            $('#serverClosedModal').modal("show")
+        }
+        else{
+            hideServerClosedModalIfVisible()
+        }
+
         return null
     }
     finally{
         clearTimeout(timeoutID)
     }
+}
+
+function getPretestSubfoldersFromTree(selectedPath){
+    const treeRows = Array.isArray(importTreeViewTable?.data) ? importTreeViewTable.data : []
+    if(treeRows.length == 0){
+        return []
+    }
+
+    const normalizedSelectedPath = normalizeUiRootPath(selectedPath)
+    const normalizedTreeRoot = normalizeUiRootPath(rootPath)
+    if(normalizedSelectedPath && normalizedTreeRoot && normalizedSelectedPath != normalizedTreeRoot){
+        return []
+    }
+
+    const folderNames = treeRows
+        .filter((row) => row && row.type == 'File Folder' && typeof row.name == 'string')
+        .map((row) => row.name.trim())
+        .filter((rowName) => rowName.length > 0)
+
+    return [...new Set(folderNames)]
 }
 
 
@@ -739,7 +793,7 @@ class TreeViewTable extends Table {
                     id: `${this.clickablePathId}${folder}`
                 })
                 clickablePathItemLink.setAttribute('tabindex', '0')
-                clickablePathItemLink.setAttribute('onclick', `executeFolderTreeRequest("${this.tableId}", "${folderPathTemp}", ${this.showFiles})`)
+                clickablePathItemLink.setAttribute('onclick', `executeFolderTreeRequest("${this.tableId}", "${folderPathTemp}", ${this.showFiles}, "", false, true)`)
     
                 let clickablePathItemLinkText = document.createElement('span')
                 Object.assign(clickablePathItemLinkText, {
@@ -785,10 +839,7 @@ class TreeViewTable extends Table {
         this.folderSection.setAttribute('id', `${this.tableId}FolderSection`)
         this.fileSection = document.createElement('tbody')
         this.fileSection.setAttribute('id', `${this.tableId}FileSection`)
-        //Remove any trailing "/" the user may have placed.
-        if(rootPath.endsWith("/")){
-            rootPath = rootPath.slice(0,-1)
-        }
+        const tableRootPath = normalizeUiRootPath(rootPath)
         for(let row in this.data){
             let tr = document.createElement('tr')
             tr.setAttribute("id", `tr-row-id-${row}`)
@@ -805,6 +856,42 @@ class TreeViewTable extends Table {
                     td.setAttribute("rowgroup", "1")
                     td.setAttribute("scope", "rowgroup")
                     td.prepend(img)
+
+                    const folderPathForDelete = joinUiPath(tableRootPath, row.name)
+                    const folderSupportsDeleteSelection = this.tableId == databaseTreeViewTableId
+                        && row.type == "File Folder"
+                        && isDatabaseContainerFolderName(row.name)
+                    if(folderSupportsDeleteSelection){
+                        const deleteCheckbox = document.createElement('input')
+                        deleteCheckbox.setAttribute('type', 'checkbox')
+                        deleteCheckbox.setAttribute('class', `usa-checkbox__input ${databaseDeleteCheckboxClass}`)
+                        deleteCheckbox.setAttribute('aria-label', `Select ${row.name} for deletion`)
+                        deleteCheckbox.setAttribute('style', 'margin-right: 0.5rem; vertical-align: middle;')
+                        deleteCheckbox.checked = normalizeUiPath(selectedDatabaseFolderForDelete) == normalizeUiPath(folderPathForDelete)
+
+                        deleteCheckbox.addEventListener('click', function(e){
+                            e.stopPropagation()
+                        })
+                        deleteCheckbox.addEventListener('keydown', function(e){
+                            e.stopPropagation()
+                        })
+                        deleteCheckbox.addEventListener('change', function(e){
+                            e.stopPropagation()
+                            if(deleteCheckbox.checked){
+                                document.querySelectorAll(`.${databaseDeleteCheckboxClass}`).forEach((checkboxItem) => {
+                                    if(checkboxItem !== deleteCheckbox){
+                                        checkboxItem.checked = false
+                                    }
+                                })
+                                setSelectedDatabaseFolderForDelete(folderPathForDelete)
+                            }
+                            else if(normalizeUiPath(selectedDatabaseFolderForDelete) == normalizeUiPath(folderPathForDelete)){
+                                clearSelectedDatabaseFolderForDelete()
+                            }
+                        })
+
+                        td.prepend(deleteCheckbox)
+                    }
                 }
                 else if(column == "containsssurgo" || column == "nodes"){
                     //These are backend flags that do not need to be displayed to the user.
@@ -832,10 +919,11 @@ class TreeViewTable extends Table {
                     else{
                         let tableId = this.tableId
                         let showFiles = this.showFiles
-                        td.setAttribute('onclick', `executeFolderTreeRequest("${tableId}", "${rootPath}/${row.name}", ${showFiles})`)
+                        const folderPath = joinUiPath(tableRootPath, row.name)
+                        td.setAttribute('onclick', `executeFolderTreeRequest("${tableId}", "${folderPath}", ${showFiles}, "", false, true)`)
                         td.addEventListener("keydown", function(e) {
                             if (e.key == 'Enter' || e.key === ' ') {
-                                executeFolderTreeRequest(tableId, `${rootPath}/${row.name}`, showFiles)
+                                executeFolderTreeRequest(tableId, folderPath, showFiles, "", false, true)
                             }
                         })
                         img.setAttribute("class", "treeViewFolderIcon filter-blue")
@@ -845,10 +933,11 @@ class TreeViewTable extends Table {
                 else{
                     if(row.type.toLowerCase() == "gpkg file" || row.type.toLowerCase() == "sqlite file"){
                         let fileExtension = row.type.toLowerCase().split(" ")[0]
-                        td.setAttribute('onclick', `selectDatabase( "${rootPath}", "${rootPath}/${row.name}.${fileExtension}")`)
+                        const selectedDatabasePath = joinUiPath(tableRootPath, `${row.name}.${fileExtension}`)
+                        td.setAttribute('onclick', `selectDatabase( "${tableRootPath}", "${selectedDatabasePath}")`)
                         td.addEventListener("keydown", function(e) {
                             if (e.key == 'Enter' || e.key === ' ') {
-                                selectDatabase(rootPath, `${rootPath}/${row.name}.${fileExtension}`)
+                                selectDatabase(tableRootPath, selectedDatabasePath)
                             }
                         })
                         if(i == 0){
@@ -943,6 +1032,178 @@ function normalizeUiPath(path){
     return String(path ?? '').trim().replaceAll('\\', '/')
 }
 
+function normalizeUiRootPath(path){
+    let normalizedPath = normalizeUiPath(path).replaceAll('//', '/')
+    if(isDriveRootUiPath(normalizedPath)){
+        normalizedPath = normalizedPath.endsWith('/') ? normalizedPath : `${normalizedPath}/`
+    }
+    return normalizedPath
+}
+
+function joinUiPath(basePath, childName){
+    const normalizedBasePath = normalizeUiRootPath(basePath)
+    const normalizedChildName = String(childName ?? '').replace(/^\/+/, '')
+
+    if(!normalizedBasePath || normalizedBasePath == '/'){
+        return `/${normalizedChildName}`
+    }
+
+    if(isDriveRootUiPath(normalizedBasePath)){
+        return `${normalizedBasePath}${normalizedChildName}`
+    }
+
+    return `${normalizedBasePath.replace(/\/+$/, '')}/${normalizedChildName}`
+}
+
+function isDatabaseContainerFolderName(folderName){
+    const lowerFolderName = String(folderName ?? '').toLowerCase()
+    return lowerFolderName.endsWith('_gpkg') || lowerFolderName.endsWith('_sqlite')
+}
+
+function setSelectedDatabaseFolderForDelete(pathValue){
+    selectedDatabaseFolderForDelete = normalizeUiPath(pathValue).replace(/\/+$/, '')
+}
+
+function clearSelectedDatabaseFolderForDelete(){
+    selectedDatabaseFolderForDelete = ''
+}
+
+function getPersistedCreateDatabaseParentFolder(){
+    if(!BrowserStorage || typeof BrowserStorage.getLocalStorage != 'function'){
+        return ''
+    }
+
+    const persistedPath = normalizeUiPath(BrowserStorage.getLocalStorage(createDatabaseParentFolderStorageKey))
+    if(isDriveRootUiPath(persistedPath)){
+        return ''
+    }
+
+    return persistedPath
+}
+
+function setPersistedCreateDatabaseParentFolder(pathValue){
+    if(!BrowserStorage || typeof BrowserStorage.setLocalStorage != 'function'){
+        return
+    }
+
+    const normalizedPath = normalizeDirectoryForDatabaseCreation(pathValue)
+    if(normalizedPath && !isDriveRootUiPath(normalizedPath)){
+        BrowserStorage.setLocalStorage(createDatabaseParentFolderStorageKey, normalizedPath)
+    }
+}
+
+async function refreshDatabaseFolderTree(){
+    let targetPath = normalizeUiRootPath(updatedValue('databaseTextBox') || rootPath)
+    if(!targetPath){
+        targetPath = osPathSep == '\\' ? 'C:/' : '/'
+    }
+
+    await executeFolderTreeRequest(databaseTreeViewTable.tableId, targetPath, true)
+}
+
+function resolveDatabaseFolderPathForDelete(pathValue){
+    let normalizedPath = normalizeUiPath(pathValue).replace(/\/+$/, '')
+    if(!normalizedPath){
+        return ''
+    }
+
+    const configuredExtensions = emptyTemplates && typeof emptyTemplates === 'object'
+        ? Object.values(emptyTemplates)
+            .map(template => String(template?.suffix ?? '').toLowerCase())
+            .filter(suffix => suffix.startsWith('.'))
+        : []
+    const knownDbSuffixes = new Set(['.gpkg', '.sqlite', ...configuredExtensions])
+
+    const lowerPath = normalizedPath.toLowerCase()
+    const isDatabaseFilePath = Array.from(knownDbSuffixes).some(suffix => lowerPath.endsWith(suffix))
+    if(isDatabaseFilePath){
+        const parentPath = normalizedPath.split('/').slice(0, -1).join('/')
+        if(parentPath){
+            normalizedPath = parentPath
+        }
+    }
+
+    const folderName = normalizedPath.split('/').slice(-1)[0]?.toLowerCase() ?? ''
+    if(folderName.endsWith('_gpkg') || folderName.endsWith('_sqlite')){
+        return normalizedPath
+    }
+
+    return ''
+}
+
+async function deleteCurrentDatabaseFolder(){
+    const pathFromInput = updatedValue('databaseTextBox')
+    const currentPath = normalizeUiPath(pathFromInput || rootPath)
+    const selectedFolderPath = resolveDatabaseFolderPathForDelete(selectedDatabaseFolderForDelete)
+    const currentRootPath = normalizeUiPath(rootPath).replace(/\/+$/, '')
+    const selectedPathIsInCurrentTree = Boolean(
+        selectedFolderPath
+        && currentRootPath
+        && (selectedFolderPath == currentRootPath || selectedFolderPath.startsWith(`${currentRootPath}/`))
+    )
+    const databaseFolderPath = selectedPathIsInCurrentTree
+        ? selectedFolderPath
+        : resolveDatabaseFolderPathForDelete(currentPath)
+
+    if(!databaseFolderPath){
+        alert('Select the checkbox next to the database folder you want to delete, or open the database folder (for example *_gpkg or *_sqlite), then click Delete database.')
+        return
+    }
+
+    const existsCheck = await doesPathExist(databaseFolderPath)
+    if(isPathCheckUnavailable(existsCheck)){
+        return
+    }
+    if(!Array.isArray(existsCheck?.failedfolders) || existsCheck.failedfolders.length != 0){
+        alert('The selected database folder could not be found. Refreshing this view.')
+        await refreshDatabaseFolderTree()
+        return
+    }
+
+    const folderName = databaseFolderPath.split('/').slice(-1)[0] || databaseFolderPath
+    const confirmed = window.confirm(
+        `Delete database folder "${folderName}" and all files inside it? This cannot be undone.`
+    )
+    if(!confirmed){
+        return
+    }
+
+    try{
+        const response = await fetch('/deleteDatabaseFolder', {
+            method : 'POST',
+            headers: {'Content-Type' : 'application/json'},
+            body: JSON.stringify({path: databaseFolderPath}),
+        })
+
+        const payload = await response.json().catch(() => ({}))
+        if(!response.ok || payload?.success !== true){
+            const responseMessage = payload?.message ? String(payload.message) : `Request failed (${response.status})`
+            throw new Error(responseMessage)
+        }
+
+        const parentPath = databaseFolderPath.split('/').slice(0, -1).join('/')
+        if(parentPath){
+            BrowserStorage.setLocalStorage(databaseTableRequest, parentPath)
+            setPersistedCreateDatabaseParentFolder(parentPath)
+            await executeFolderTreeRequest(databaseTreeViewTable.tableId, parentPath, true)
+        }
+        else{
+            await refreshDatabaseFolderTree()
+        }
+
+        if(normalizeUiPath(selectedDatabaseFolderForDelete).replace(/\/+$/, '') == normalizeUiPath(databaseFolderPath).replace(/\/+$/, '')){
+            clearSelectedDatabaseFolderForDelete()
+        }
+
+        alert(`Deleted database folder: ${folderName}`)
+    }
+    catch(error){
+        const errorMessage = `Unable to delete database folder: ${error?.message ?? error}`
+        fetch('/tlogger/error:' + encodeURIComponent(errorMessage))
+        alert(errorMessage)
+    }
+}
+
 function isDriveRootUiPath(path){
     return /^[A-Za-z]:\/?$/.test(path)
 }
@@ -980,7 +1241,13 @@ function displayLandingPage(){
 /**Check if cookie exists, otherwise set default value. Then send request to the python server.*/
 async function initializeTreeView(request, cookie){
     const isDownloadTreeRequest = request == downloadTreeViewTableId
-    let path = normalizeUiPath(BrowserStorage.getLocalStorage(cookie))
+    const isDatabaseTreeRequest = request == databaseTreeViewTableId
+    let path = normalizeUiRootPath(BrowserStorage.getLocalStorage(cookie))
+
+    if(isDatabaseTreeRequest && path){
+        path = normalizeDirectoryForDatabaseCreation(path)
+    }
+
     let pathCheck = undefined
 
     if(path){
@@ -990,12 +1257,69 @@ async function initializeTreeView(request, cookie){
     const pathExists = Boolean(
         path
         && pathCheck
+        && !isPathCheckUnavailable(pathCheck)
         && Array.isArray(pathCheck.failedfolders)
         && pathCheck.failedfolders.length == 0
     )
 
     if(pathExists && !(isDownloadTreeRequest && isDriveRootUiPath(path))){
-        path = normalizeUiPath(BrowserStorage.getLocalStorage(cookie))
+        path = normalizeUiRootPath(BrowserStorage.getLocalStorage(cookie))
+
+        if(isDatabaseTreeRequest){
+            path = normalizeDirectoryForDatabaseCreation(path)
+
+            if(isDriveRootUiPath(path)){
+                const selectedDatabaseParentPath = normalizeDirectoryForDatabaseCreation(databasePath)
+                const fallbackCandidates = [selectedDatabaseParentPath, getPersistedCreateDatabaseParentFolder()]
+
+                for(const candidatePath of fallbackCandidates){
+                    if(!candidatePath || isDriveRootUiPath(candidatePath)){
+                        continue
+                    }
+
+                    const candidatePathStatus = await doesPathExist(candidatePath)
+                    if(
+                        isPathCheckUnavailable(candidatePathStatus)
+                        || (Array.isArray(candidatePathStatus?.failedfolders) && candidatePathStatus.failedfolders.length == 0)
+                    ){
+                        path = candidatePath
+                        BrowserStorage.setLocalStorage(cookie, candidatePath)
+                        break
+                    }
+                }
+            }
+        }
+    }
+    else if(isDatabaseTreeRequest){
+        const selectedDatabaseParentPath = normalizeDirectoryForDatabaseCreation(databasePath)
+        const fallbackCandidates = [selectedDatabaseParentPath, getPersistedCreateDatabaseParentFolder()]
+        let resolvedFallbackPath = ''
+
+        for(const candidatePath of fallbackCandidates){
+            if(!candidatePath || isDriveRootUiPath(candidatePath)){
+                continue
+            }
+
+            const candidatePathStatus = await doesPathExist(candidatePath)
+            if(
+                isPathCheckUnavailable(candidatePathStatus)
+                || (Array.isArray(candidatePathStatus?.failedfolders) && candidatePathStatus.failedfolders.length == 0)
+            ){
+                resolvedFallbackPath = candidatePath
+                break
+            }
+        }
+
+        if(resolvedFallbackPath){
+            path = resolvedFallbackPath
+            BrowserStorage.setLocalStorage(cookie, resolvedFallbackPath)
+        }
+        else if(osPathSep == "\\"){
+            path = 'C:/'
+        }
+        else{
+            path = "/"
+        }
     }
     else if(isDownloadTreeRequest){
         const defaultDownloadPath = await getDefaultDownloadFolderPath()
@@ -1018,8 +1342,7 @@ async function initializeTreeView(request, cookie){
     }
 
     requestLocation = request
-    rootPath = path.replaceAll('\\', '/')
-    rootPath = rootPath.replaceAll ('//', '/')
+    rootPath = normalizeUiRootPath(path)
     let limitnavigationdepth
     let showFiles
     if(request == "importTreeViewTable"){
@@ -1047,8 +1370,11 @@ async function initializeTreeView(request, cookie){
     await sendData(data)
 }
 async function continuePathNavigation(request, path, showfiles, folderPattern, toggleWarnings = true){
-    path = path.replaceAll("\\", "/")
+    path = normalizeUiRootPath(path)
     let pathCheck = await doesPathExist(path)
+    if(isPathCheckUnavailable(pathCheck)){
+        return false
+    }
     let object
     if(request == databaseTreeViewTableId){
         object = document.getElementById('databaseTextBox')
@@ -1063,13 +1389,14 @@ async function continuePathNavigation(request, path, showfiles, folderPattern, t
     if(parentPath == undefined){
         parentPath = object.value
     }
-    parentPath = parentPath.replaceAll("\\", "/")
+    parentPath = normalizeUiRootPath(parentPath)
     if(parentPath == path){
         parentPath = parentPath.split("/").slice(0, -1).join("/")
+        parentPath = normalizeUiRootPath(parentPath)
     }
-    if(pathCheck["failedfolders"].length != 0){
+    if(Array.isArray(pathCheck?.failedfolders) && pathCheck.failedfolders.length != 0){
         let oldPathCheck = await doesPathExist(parentPath)
-        if(oldPathCheck["failedfolders"].length != 0){
+        if(!isPathCheckUnavailable(oldPathCheck) && (!Array.isArray(oldPathCheck?.failedfolders) || oldPathCheck.failedfolders.length != 0)){
             if(request == downloadTreeViewTableId){
                 const defaultDownloadPath = await getDefaultDownloadFolderPath()
                 parentPath = defaultDownloadPath ? defaultDownloadPath : 'C:/'
@@ -1109,14 +1436,18 @@ async function continuePathNavigation(request, path, showfiles, folderPattern, t
 }
 
 /**Sends "getfoldertree" request to the server*/
-async function executeFolderTreeRequest(request, path, showfiles, folderPattern = "", isCloseMissingObjectModal = false){
+async function executeFolderTreeRequest(request, path, showfiles, folderPattern = "", isCloseMissingObjectModal = false, skipPathValidation = false){
+    folderPattern = (typeof folderPattern == 'string') ? folderPattern : ""
+
     const databaseTextBox = document.getElementById('databaseTextBox')
     const ssaTextBox = document.getElementById('ssaTextBox')
     const downloadTextBox = document.getElementById("downloadTextBox")
     //Variable to gather the value of the tree view current path. We cannot use rootPath as the value could be the opposite tree view value
-    let goodPath = await continuePathNavigation(request, path, showfiles, folderPattern)
-    if(!goodPath){
-        return
+    if(!skipPathValidation){
+        let goodPath = await continuePathNavigation(request, path, showfiles, folderPattern)
+        if(!goodPath){
+            return
+        }
     }
     requestLocation = request
     let maxdepth
@@ -1136,8 +1467,7 @@ async function executeFolderTreeRequest(request, path, showfiles, folderPattern 
         maxdepth = 0
     }
     //Clean up paths. We will send out the file path using the "/" as this simplifies the response returned
-    rootPath = path.replaceAll('\\', '/')
-    rootPath = rootPath.replaceAll ('//', '/')
+    rootPath = normalizeUiRootPath(path)
     let data = {'request': getFolderTreeRequest, 'path': rootPath, 'folderpattern' : `.*${folderPattern}.*`, 'ignorefoldercase': true,
         'filepattern' : `.*${folderPattern}.*`, 'ignorefilecase': true, 'showfiles': showfiles, 'maxdepth': maxdepth}
     await sendData(data)
@@ -1155,11 +1485,17 @@ async function executeFolderTreeRequest(request, path, showfiles, folderPattern 
     if (isCloseMissingObjectModal == true) {
         // focus DB selection filepath 
         if($("#clickablePathOL").is(":visible")) { 
-            document.getElementById("clickablePathOL0").focus()
+            const dbPathBreadcrumb = document.getElementById("clickablePathOL0")
+            if (dbPathBreadcrumb) {
+                dbPathBreadcrumb.focus()
+            }
         }
         // focus SSURGO Data folder selection filepath 
         if($("#ssaClickablePathOL").is(":visible")) { 
-            document.getElementById("ssaClickablePathOL0").focus() 
+            const ssaPathBreadcrumb = document.getElementById("ssaClickablePathOL0")
+            if (ssaPathBreadcrumb) {
+                ssaPathBreadcrumb.focus()
+            }
         }
         // focus to DB selection filepath textbox 
         if($("#databaseTextBox").is(":visible")) { 
@@ -1197,6 +1533,104 @@ function updatedValue(elementId){
     val = document.getElementById(elementId).value
     return val
 }
+function hideServerClosedModalIfVisible(){
+    const serverClosedModal = $('#serverClosedModal')
+    if(serverClosedModal && serverClosedModal.length > 0){
+        serverClosedModal.modal('hide')
+    }
+}
+
+async function confirmServerAvailability(maxAttempts = 3, retryDelayMs = 400, showModalOnFailure = true){
+    const endpoints = ['/serverStatus', '/startUp']
+
+    for(let attempt = 1; attempt <= maxAttempts; attempt++){
+        for(const endpoint of endpoints){
+            try{
+                const response = await fetch(endpoint, {method: 'GET', cache: 'no-store'})
+                if(response.ok){
+                    hideServerClosedModalIfVisible()
+                    return true
+                }
+            }
+            catch(error){
+                // Try alternate endpoint and retry attempts before surfacing server-unavailable state.
+            }
+        }
+
+        if(attempt < maxAttempts){
+            await delay(retryDelayMs)
+        }
+    }
+
+    if(showModalOnFailure){
+        $('#serverClosedModal').modal("show")
+    }
+
+    return false
+}
+
+let serverClosedRecoveryCheckInProgress = false
+
+async function recoverServerClosedModalIfServerIsAvailable(){
+    if(serverClosedRecoveryCheckInProgress){
+        return
+    }
+
+    const serverClosedModal = $('#serverClosedModal')
+    if(!serverClosedModal || serverClosedModal.length == 0 || !serverClosedModal.hasClass('show')){
+        return
+    }
+
+    serverClosedRecoveryCheckInProgress = true
+    try{
+        const serverAvailable = await confirmServerAvailability(1, 0, false)
+        if(serverAvailable){
+            hideServerClosedModalIfVisible()
+        }
+    }
+    finally{
+        serverClosedRecoveryCheckInProgress = false
+    }
+}
+
+function isPathCheckUnavailable(pathCheck){
+    return pathCheck?.status == 'server_unavailable'
+}
+
+function getJsonByteLength(value){
+    const jsonValue = JSON.stringify(value)
+    if(typeof TextEncoder !== 'undefined'){
+        return new TextEncoder().encode(jsonValue).length
+    }
+    return jsonValue.length
+}
+
+function splitPathsIntoFileCheckChunks(paths, maxJsonBytes = 80 * 1024){
+    const chunks = []
+    let currentChunk = []
+
+    for(const folderPath of paths){
+        if(currentChunk.length == 0){
+            currentChunk.push(folderPath)
+            continue
+        }
+
+        const candidateChunk = [...currentChunk, folderPath]
+        if(getJsonByteLength(candidateChunk) <= maxJsonBytes){
+            currentChunk.push(folderPath)
+            continue
+        }
+
+        chunks.push(currentChunk)
+        currentChunk = [folderPath]
+    }
+
+    if(currentChunk.length > 0){
+        chunks.push(currentChunk)
+    }
+
+    return chunks
+}
 
 /**Checks the file system to see if a folder or file exists. Returns a boolean */
 async function doesPathExist(path){
@@ -1207,56 +1641,82 @@ async function doesPathExist(path){
         .filter((value) => value.length > 0)
 
     if(normalizedPaths.length == 0){
-        return {"failedfolders": []}
+        return {"failedfolders": [], "status": "ok"}
     }
 
+    const pathChunks = splitPathsIntoFileCheckChunks(normalizedPaths)
+    const failedFolders = new Set()
+
     try{
-        const response = await fetch(fileCheckUrl, {
-            method : 'POST',
-            headers: {'Content-Type' : 'application/json'},
-            body: JSON.stringify(normalizedPaths),
-        })
+        for(const chunk of pathChunks){
+            const response = await fetch(fileCheckUrl, {
+                method : 'POST',
+                headers: {'Content-Type' : 'application/json'},
+                body: JSON.stringify(chunk),
+            })
 
-        if(!response.ok){
-            $('#serverClosedModal').modal("show")
-            return {"failedfolders": normalizedPaths}
+            if(!response.ok){
+                const serverAvailable = await confirmServerAvailability(1, 0, false)
+                if(!serverAvailable){
+                    $('#serverClosedModal').modal("show")
+                }
+                else{
+                    hideServerClosedModalIfVisible()
+                }
+                return {"failedfolders": [], "status": "server_unavailable"}
+            }
+
+            const payload = await response.json()
+            if(!payload || !Array.isArray(payload.failedfolders)){
+                return {"failedfolders": [], "status": "server_unavailable"}
+            }
+
+            for(const failedFolder of payload.failedfolders){
+                failedFolders.add(failedFolder)
+            }
         }
 
-        const payload = await response.json()
-        if(!payload || !Array.isArray(payload.failedfolders)){
-            return {"failedfolders": normalizedPaths}
-        }
-
-        return payload
+        hideServerClosedModalIfVisible()
+        return {"failedfolders": [...failedFolders], "status": "ok"}
     }
     catch(e){
         if(e instanceof TypeError){
             echo("Unable to connect to server.")
-            $('#serverClosedModal').modal("show")
+
+            const serverAvailable = await confirmServerAvailability(1, 0, false)
+            if(!serverAvailable){
+                $('#serverClosedModal').modal("show")
+            }
+            else{
+                hideServerClosedModalIfVisible()
+            }
         }
         else{
             echo(e?.message ?? e)
         }
 
-        return {"failedfolders": normalizedPaths}
+        return {"failedfolders": [], "status": "server_unavailable"}
     }
 }
 
 async function selectDatabase(cookieRoot,  path){
     document.getElementById('helpPaneContainer').setAttribute("style", "display: none") //close the help menu if it was open before navigating away
-    document.getElementById("selectDatabasePage").hidden; //Hides the selectDatabasePage and returns the user to the previous page they were on (Either 'Import SSURGO Data, 'SSURGO Data in Database' or 'Soil Data Viewer')
     document.getElementById("deleteBtn").disabled = true //disable the delete button after selecting a database
     $("#sdvSelectMessage").html("<strong>Please select a rating to perform aggregation.</strong>")
     //always reset the deleteCheckboxesSelected[] array
     deleteCheckboxesSelected = []
     BrowserStorage.setLocalStorage(databaseTableRequest, cookieRoot)
+    setPersistedCreateDatabaseParentFolder(cookieRoot)
     databasePath = path
     let data = {'request' : databaseTableRequest, 'database' : databasePath, 'wheretext' : ""}
-    let pathCheck = await doesPathExist(path)   
-    if(pathCheck["failedfolders"].length != 0){
+    let pathCheck = await doesPathExist(path)
+    if(isPathCheckUnavailable(pathCheck)){
+        return
+    }
+    if(Array.isArray(pathCheck?.failedfolders) && pathCheck.failedfolders.length != 0){
         document.getElementById('missingObjectModalBtn').click()
-        document.getElementById("closeMissingObjectModal").setAttribute("onclick", `executeFolderTreeRequest('${databaseTreeViewTable.tableId}', '${rootPath}', true, undefined, true)`)
-        document.getElementById("closeMissingObjectModalBtn").setAttribute("onclick", `executeFolderTreeRequest('${databaseTreeViewTable.tableId}', '${rootPath}', true, undefined, false)`)
+        document.getElementById("closeMissingObjectModal").setAttribute("onclick", `executeFolderTreeRequest('${databaseTreeViewTable.tableId}', '${rootPath}', true, '', true)`)
+        document.getElementById("closeMissingObjectModalBtn").setAttribute("onclick", `executeFolderTreeRequest('${databaseTreeViewTable.tableId}', '${rootPath}', true, '', false)`)
         document.getElementById('missingObjectModal').addEventListener('click', function(e) {
             if(e.target.className == 'usa-modal-overlay') {
                 document.getElementById("closeMissingObjectModalBtn").click()
@@ -1264,7 +1724,9 @@ async function selectDatabase(cookieRoot,  path){
         })
     }
     else{
-        sendData(data)
+        $("#selectDatabasePage").hide()
+        $("#homePageContainer").show()
+        await sendData(data)
         // If folderPath exists (meaning a local SSURGO Data Folder has been selected), we need to call selectSSAParentFolder() so the Import SSURGO
         // Data table gets rebuilt based off the data in the newly selected database AND pre-tests are re-executed.
         if (folderPath != null) {
@@ -1277,6 +1739,7 @@ async function selectDatabase(cookieRoot,  path){
 function promptUsersToImport(){
     $("#promptUsersToImport").show()
     $("#promptUsersToImport").attr('aria-hidden', false)
+    setImportFilterContainerVisibility(false)
 }
 
 async function selectDownloadParentFolder(path) {
@@ -1375,8 +1838,23 @@ class ImportActivities{
 
 /**Set Import Folder cookie, then send request to server to pretest subfolders */
     static async selectSSAParentFolder(path, resetCheckboxes = true){
+        const normalizedRequestedPath = normalizeUiPath(path)
+        if(importPretestInFlight){
+            if(normalizedRequestedPath && normalizedRequestedPath != normalizeUiPath(folderPath)){
+                pendingImportPretestPath = normalizedRequestedPath
+                sendLoggerWarning(`Queued folder change while pretest is running: ${normalizedRequestedPath}`)
+            }
+            return
+        }
+        importPretestInFlight = true
+        pendingImportPretestPath = null
+
         ImportActivities.hidePromptForImport()
-        document.getElementById("importNavLink").click() //Default back to the Import table
+        setImportFilterContainerVisibility(false)
+        const importNavLink = document.getElementById("importNavLink")
+        if(importNavLink){
+            importNavLink.click() //Default back to the Import table
+        }
         //always reset the importTable.selectedCheckboxes[] array
         if (resetCheckboxes) {
             importTable.selectedCheckboxes = []
@@ -1390,38 +1868,102 @@ class ImportActivities{
         let duplicateDiv = document.getElementById('duplicateDiv')
         let duplicateDivBtn = document.getElementById('toggleDuplicateDiv')
         let refreshBtn = document.getElementById('refreshBtn')
-        //disable buttons while loading
-        Array.from(document.getElementsByClassName('toggleDisableOnLoad')).forEach(element => element.disabled = true)
-        Array.from(document.getElementsByClassName('nav-link')).forEach(element => element.disabled = false)
-        //If table exists, hide
-        if(typeof(table) != 'undefined' && table != null){
-            table.setAttribute('style', 'display:none;')
-            tableFooter.setAttribute('style', 'display:none;')
+        try{
+            //disable buttons while loading
+            Array.from(document.getElementsByClassName('toggleDisableOnLoad')).forEach(element => {
+                if(element.id == 'selectedFolderNameBrowseBtn' || element.id == 'selectDatabaseBrowseBtn'){
+                    element.disabled = false
+                    return
+                }
+                element.disabled = true
+            })
+            Array.from(document.getElementsByClassName('nav-link')).forEach(element => element.disabled = false)
+            //If table exists, hide
+            if(typeof(table) != 'undefined' && table != null){
+                table.setAttribute('style', 'display:none;')
+                if(tableFooter){
+                    tableFooter.setAttribute('style', 'display:none;')
+                }
+            }
+            if(loadScreen){
+                loadScreen.removeAttribute('style')
+            }
+            if(errorDivBtn){
+                errorDivBtn.setAttribute('style', 'display:none;')
+            }
+            if(duplicateDivBtn){
+                duplicateDivBtn.setAttribute('style', 'display:none;')
+            }
+            if(errorDiv){
+                errorDiv.innerHTML = ''
+            }
+            if(duplicateDiv){
+                duplicateDiv.innerHTML = ''
+            }
+            BrowserStorage.setLocalStorage(pretestImportCandidatesRequest, path)
+            folderPath = path
+            let isTabularOnly = document.getElementById('loadTabularData')?.checked ?? false
+            let data = {
+                'request' : pretestImportCandidatesRequest,
+                'database' : databasePath,
+                'root' : folderPath,
+                'istabularonly': isTabularOnly,
+                'quickpretest': true,
+            }
+
+            const candidateSubfolders = getPretestSubfoldersFromTree(folderPath)
+            if(candidateSubfolders.length > 0){
+                const requestWithSubfolders = {
+                    ...data,
+                    'subfolders': candidateSubfolders,
+                }
+                if(getJsonByteLength(requestWithSubfolders) <= 80 * 1024){
+                    data = requestWithSubfolders
+                }
+                else{
+                    sendLoggerWarning(`Pretest subfolder payload exceeded size cap; falling back to server-side folder discovery. count=${candidateSubfolders.length}`)
+                }
+            }
+
+            await sendData(data)
+            //Display table and hide loading message
+            table = document.getElementById(importTableId) //redefine table. This is necessary if the table did not exist before sendData.
+            tableFooter = document.getElementById('folderRecordCounter')
+            if(loadScreen){
+                loadScreen.setAttribute('style', 'display:none;')
+            }
+            if(table){
+                table.removeAttribute('style')
+            }
+            if(tableFooter){
+                tableFooter.removeAttribute('style')
+            }
+            if(refreshBtn){
+                refreshBtn.setAttribute('style', 'display: block') //display refreshBtn after building table
+            }
+            //re-enable buttons after pretests are complete
+            Array.from(document.getElementsByClassName('toggleDisableOnLoad')).forEach(element => element.disabled = false)
+            if(databaseTable.selectedCheckboxes.length <= 0){
+                const deleteBtn = document.getElementById('deleteBtn')
+                if(deleteBtn){
+                    deleteBtn.disabled = true
+                }
+            }
+            if (importTable.selectedCheckboxes.length <= 0) {
+                const importBtn = document.getElementById('importBtn')
+                if(importBtn){
+                    importBtn.disabled = true
+                }
+            }
         }
-        loadScreen.removeAttribute('style')
-        errorDivBtn.setAttribute('style', 'display:none;')
-        duplicateDivBtn.setAttribute('style', 'display:none;')
-        errorDiv.innerHTML = ''
-        duplicateDiv.innerHTML = ''
-        BrowserStorage.setLocalStorage(pretestImportCandidatesRequest, path)
-        folderPath = path
-        let isTabularOnly = document.getElementById('loadTabularData').checked
-        let data = {'request' : pretestImportCandidatesRequest, 'database' : databasePath, 'root' : folderPath, 'istabularonly': isTabularOnly}
-        await sendData(data)
-        //Display table and hide loading message
-        table = document.getElementById(importTableId) //redefine table. This is necessary if the table did not exist before sendData.
-        tableFooter = document.getElementById('folderRecordCounter')
-        loadScreen.setAttribute('style', 'display:none;')
-        table.removeAttribute('style')
-        tableFooter.removeAttribute('style')
-        refreshBtn.setAttribute('style', 'display: block') //display refreshBtn after building table
-        //re-enable buttons after pretests are complete
-        Array.from(document.getElementsByClassName('toggleDisableOnLoad')).forEach(element => element.disabled = false)
-        if(databaseTable.selectedCheckboxes.length <= 0){
-            document.getElementById('deleteBtn').disabled = true
-        }
-        if (importTable.selectedCheckboxes.length <= 0) {
-            document.getElementById('importBtn').disabled = true
+        finally{
+            importPretestInFlight = false
+
+            if(pendingImportPretestPath && pendingImportPretestPath != normalizeUiPath(folderPath)){
+                const queuedPath = pendingImportPretestPath
+                pendingImportPretestPath = null
+                ImportActivities.selectSSAParentFolder(queuedPath, true)
+            }
         }
     }
 
@@ -1437,6 +1979,9 @@ class ImportActivities{
         $("#promptUsersToImport").attr('aria-hidden', true)
     }
 }
+
+let importPretestInFlight = false
+let pendingImportPretestPath = null
 //re-execute pre-tests when the "Load Tabular Data Only" button is clicked
 $("#loadTabularData").click(function(){
     ImportActivities.selectSSAParentFolder(folderPath, false)
@@ -1453,6 +1998,40 @@ $("#importNavLink").click(function(){
         document.getElementById("refreshBtn").setAttribute("style", "display: block")
     }
 })
+
+const importStateFilterElement = document.getElementById('importStateFilter')
+if(importStateFilterElement){
+    importStateFilterElement.addEventListener('change', function(){
+        applyImportTableFilters({resetSelection: false})
+    })
+}
+
+const importDbStatusFilterElement = document.getElementById('importDbStatusFilter')
+if(importDbStatusFilterElement){
+    importDbStatusFilterElement.addEventListener('change', function(){
+        applyImportTableFilters({resetSelection: false})
+    })
+}
+
+let importSearchFilterDebounceId = null
+const importSearchFilterElement = document.getElementById('importSearchFilter')
+if(importSearchFilterElement){
+    importSearchFilterElement.addEventListener('input', function(){
+        if(importSearchFilterDebounceId != null){
+            clearTimeout(importSearchFilterDebounceId)
+        }
+        importSearchFilterDebounceId = setTimeout(() => {
+            applyImportTableFilters({resetSelection: false})
+        }, 120)
+    })
+}
+
+const clearImportFiltersBtn = document.getElementById('clearImportFiltersBtn')
+if(clearImportFiltersBtn){
+    clearImportFiltersBtn.addEventListener('click', function(){
+        clearImportTableFilters()
+    })
+}
 
 /************************************************************END TREE VIEW METHODS ********************************* */
 
@@ -1475,6 +2054,7 @@ let importTable = new CheckboxTable(
     '',
     selectedCheckboxes = []
 );
+importTable.unfilteredData = []
 
 let databaseTable = new CheckboxTable(
     tableId = dbTableId,
@@ -1805,6 +2385,9 @@ function populateDuplicateMessage(){
 function getTotalFolders(folders){
     importTable.errorFolders = 0
     importTable.totalRows = 0
+    if(!Array.isArray(folders)){
+        return
+    }
     for(item in folders){
         if(folders[item].preteststatus){
             importTable.totalRows += 1
@@ -1841,6 +2424,332 @@ function setDuplicateToggleDisplay(){
         innerHTML: `${Object.keys(duplicateSSAs).length} area symbol(s) are found in multiple folders. Click this message to view.`,
     })
     duplicateDiv.appendChild(p)
+}
+
+function countImportableFolders(folders){
+    if(!Array.isArray(folders)){
+        return 0
+    }
+
+    return folders.reduce((total, folderRecord) => {
+        return total + (folderRecord?.preteststatus ? 1 : 0)
+    }, 0)
+}
+
+function getImportAreaSymbols(folderRecord){
+    if(!folderRecord || typeof folderRecord != 'object' || !folderRecord.areasymbols || typeof folderRecord.areasymbols != 'object'){
+        return []
+    }
+
+    return Object.keys(folderRecord.areasymbols)
+}
+
+function getStateCodeFromAreaSymbol(areaSymbol){
+    const normalizedAreaSymbol = String(areaSymbol ?? '').trim().toUpperCase()
+    const stateCodeMatch = normalizedAreaSymbol.match(/^[A-Z]{2}/)
+    return stateCodeMatch ? stateCodeMatch[0] : ''
+}
+
+function rowMatchesStateFilter(folderRecord, stateFilter){
+    if(stateFilter == importStateFilterAllValue){
+        return true
+    }
+
+    const folderStateCodes = getImportAreaSymbols(folderRecord)
+        .map((areaSymbol) => getStateCodeFromAreaSymbol(areaSymbol))
+        .filter((stateCode) => stateCode != '')
+
+    return folderStateCodes.includes(stateFilter)
+}
+
+function rowMatchesDatabaseFilter(folderRecord, dbFilter){
+    if(dbFilter == importDbFilterAllValue){
+        return true
+    }
+
+    const areaRecords = folderRecord?.areasymbols && typeof folderRecord.areasymbols == 'object'
+        ? Object.values(folderRecord.areasymbols)
+        : []
+
+    if(dbFilter == importDbFilterExistsValue){
+        return areaRecords.some((areaRecord) => String(areaRecord?.dbversion ?? '').trim() != '')
+    }
+
+    if(dbFilter == importDbFilterMissingValue){
+        return areaRecords.some((areaRecord) => String(areaRecord?.dbversion ?? '').trim() == '')
+    }
+
+    return true
+}
+
+function normalizeImportSearchTerm(searchValue){
+    return String(searchValue ?? '').trim().toLowerCase()
+}
+
+function getImportSearchText(folderRecord){
+    if(!folderRecord || typeof folderRecord != 'object'){
+        return ''
+    }
+
+    const cachedValue = importSearchTextCache.get(folderRecord)
+    if(typeof cachedValue == 'string'){
+        return cachedValue
+    }
+
+    const parts = []
+    const appendValue = (value) => {
+        const normalizedValue = String(value ?? '').trim()
+        if(normalizedValue != ''){
+            parts.push(normalizedValue.toLowerCase())
+        }
+    }
+
+    appendValue(folderRecord.childfoldername)
+    appendValue(folderRecord.childfolderpath)
+    appendValue(folderRecord.folderpath)
+    appendValue(folderRecord.parentfolder)
+
+    const areaSymbols = getImportAreaSymbols(folderRecord)
+    areaSymbols.forEach((areaSymbol) => appendValue(areaSymbol))
+
+    if(folderRecord.areasymbols && typeof folderRecord.areasymbols == 'object'){
+        Object.values(folderRecord.areasymbols).forEach((areaRecord) => {
+            if(areaRecord && typeof areaRecord == 'object'){
+                appendValue(areaRecord.areaname)
+            }
+        })
+    }
+
+    const searchText = parts.join(' ')
+    importSearchTextCache.set(folderRecord, searchText)
+    return searchText
+}
+
+function rowMatchesSearchFilter(folderRecord, searchTerm){
+    if(searchTerm == ''){
+        return true
+    }
+
+    return getImportSearchText(folderRecord).includes(searchTerm)
+}
+
+function collectImportStateCodes(folders){
+    let stateCodes = new Set()
+
+    if(!Array.isArray(folders)){
+        return []
+    }
+
+    for(const folderRecord of folders){
+        for(const areaSymbol of getImportAreaSymbols(folderRecord)){
+            const stateCode = getStateCodeFromAreaSymbol(areaSymbol)
+            if(stateCode){
+                stateCodes.add(stateCode)
+            }
+        }
+    }
+
+    return Array.from(stateCodes).sort()
+}
+
+function updateImportStateFilterOptions(folders){
+    let stateFilterElement = document.getElementById('importStateFilter')
+    if(!stateFilterElement){
+        return
+    }
+
+    const previousValue = stateFilterElement.value || importStateFilterAllValue
+    const stateCodes = collectImportStateCodes(folders)
+    stateFilterElement.innerHTML = ''
+
+    let allOption = document.createElement('option')
+    allOption.value = importStateFilterAllValue
+    allOption.innerText = 'All states'
+    stateFilterElement.appendChild(allOption)
+
+    stateCodes.forEach((stateCode) => {
+        let option = document.createElement('option')
+        option.value = stateCode
+        option.innerText = stateCode
+        stateFilterElement.appendChild(option)
+    })
+
+    if(previousValue == importStateFilterAllValue || stateCodes.includes(previousValue)){
+        stateFilterElement.value = previousValue
+    }
+    else{
+        stateFilterElement.value = importStateFilterAllValue
+    }
+
+    stateFilterElement.disabled = stateCodes.length == 0
+}
+
+function updateImportFilterSummary(visibleCount, totalCount){
+    let importFilterResults = document.getElementById('importFilterResults')
+    if(!importFilterResults){
+        return
+    }
+
+    if(totalCount == 0){
+        importFilterResults.innerText = 'No importable folders found.'
+    }
+    else if(visibleCount == totalCount){
+        importFilterResults.innerText = `Showing all ${visibleCount} importable folder(s).`
+    }
+    else{
+        importFilterResults.innerText = `Showing ${visibleCount} of ${totalCount} importable folder(s).`
+    }
+}
+
+function setImportFilterContainerVisibility(isVisible){
+    const filterContainer = document.getElementById('importFiltersContainer')
+    if(filterContainer){
+        filterContainer.style.display = isVisible ? 'flex' : 'none'
+    }
+}
+
+function resetImportFilterControls(folders){
+    const stateFilterElement = document.getElementById('importStateFilter')
+    const searchFilterElement = document.getElementById('importSearchFilter')
+    const dbFilterElement = document.getElementById('importDbStatusFilter')
+    const clearFilterButton = document.getElementById('clearImportFiltersBtn')
+    const importableRecordCount = countImportableFolders(folders)
+    const hasImportableRecords = importableRecordCount > 0
+
+    if(!hasImportableRecords){
+        setImportFilterContainerVisibility(false)
+        if(stateFilterElement){
+            stateFilterElement.value = importStateFilterAllValue
+            stateFilterElement.disabled = true
+        }
+        if(searchFilterElement){
+            searchFilterElement.value = ''
+            searchFilterElement.disabled = true
+        }
+        if(dbFilterElement){
+            dbFilterElement.value = importDbFilterAllValue
+            dbFilterElement.disabled = true
+        }
+        if(clearFilterButton){
+            clearFilterButton.disabled = true
+        }
+
+        updateImportFilterSummary(0, 0)
+        return
+    }
+
+    setImportFilterContainerVisibility(true)
+
+    const previousDbValue = dbFilterElement ? dbFilterElement.value : importDbFilterAllValue
+    updateImportStateFilterOptions(folders)
+
+    if(dbFilterElement){
+        const validDbValues = [importDbFilterAllValue, importDbFilterExistsValue, importDbFilterMissingValue]
+        dbFilterElement.value = validDbValues.includes(previousDbValue) ? previousDbValue : importDbFilterAllValue
+        dbFilterElement.disabled = false
+    }
+
+    if(searchFilterElement){
+        searchFilterElement.disabled = false
+    }
+
+    if(clearFilterButton){
+        clearFilterButton.disabled = false
+    }
+}
+
+function clearImportTableFilters(){
+    const stateFilterElement = document.getElementById('importStateFilter')
+    const searchFilterElement = document.getElementById('importSearchFilter')
+    const dbFilterElement = document.getElementById('importDbStatusFilter')
+
+    if(stateFilterElement){
+        stateFilterElement.value = importStateFilterAllValue
+    }
+    if(searchFilterElement){
+        searchFilterElement.value = ''
+    }
+    if(dbFilterElement){
+        dbFilterElement.value = importDbFilterAllValue
+    }
+
+    applyImportTableFilters({resetSelection: false})
+}
+
+function applyImportTableFilters(options = {}){
+    const resetSelection = Boolean(options?.resetSelection)
+    const sourceData = Array.isArray(importTable.unfilteredData) ? importTable.unfilteredData : []
+    const stateFilterElement = document.getElementById('importStateFilter')
+    const searchFilterElement = document.getElementById('importSearchFilter')
+    const dbFilterElement = document.getElementById('importDbStatusFilter')
+    const clearFilterButton = document.getElementById('clearImportFiltersBtn')
+    const selectedStateFilter = stateFilterElement ? stateFilterElement.value : importStateFilterAllValue
+    const selectedSearchFilter = normalizeImportSearchTerm(searchFilterElement ? searchFilterElement.value : '')
+    const selectedDbFilter = dbFilterElement ? dbFilterElement.value : importDbFilterAllValue
+
+    const filteredData = sourceData.filter((folderRecord) => {
+        return (
+            rowMatchesStateFilter(folderRecord, selectedStateFilter)
+            && rowMatchesDatabaseFilter(folderRecord, selectedDbFilter)
+            && rowMatchesSearchFilter(folderRecord, selectedSearchFilter)
+        )
+    })
+
+    const visibleFolderNames = new Set(
+        filteredData
+            .filter((folderRecord) => folderRecord?.preteststatus)
+            .map((folderRecord) => folderRecord.childfoldername)
+    )
+
+    if(resetSelection){
+        importTable.selectedCheckboxes = []
+    }
+    else if(Array.isArray(importTable.selectedCheckboxes)){
+        importTable.selectedCheckboxes = importTable.selectedCheckboxes.filter((folderName) => visibleFolderNames.has(folderName))
+    }
+
+    importTable.data = filteredData
+
+    let errorDiv = document.getElementById('errorDiv')
+    if(errorDiv){
+        errorDiv.innerHTML = ''
+    }
+
+    let duplicateDiv = document.getElementById('duplicateDiv')
+    if(duplicateDiv){
+        duplicateDiv.innerHTML = ''
+    }
+
+    getTotalFolders(filteredData)
+    if(importTable.errorFolders > 0){
+        setErrorToggleDisplay()
+        document.getElementById('toggleErrorDiv').removeAttribute('style')
+    }
+    else{
+        document.getElementById('toggleErrorDiv').setAttribute('style', 'display: none')
+    }
+
+    buildImportTable()
+
+    if(Object.keys(duplicateSSAs).length > 0){
+        setDuplicateToggleDisplay()
+        document.getElementById('toggleDuplicateDiv').removeAttribute('style')
+    }
+    else{
+        document.getElementById('toggleDuplicateDiv').setAttribute('style', 'display: none')
+    }
+
+    const visibleImportableCount = countImportableFolders(filteredData)
+    const totalImportableCount = countImportableFolders(sourceData)
+    updateImportFilterSummary(visibleImportableCount, totalImportableCount)
+
+    if(clearFilterButton){
+        clearFilterButton.disabled = (
+            selectedStateFilter == importStateFilterAllValue
+            && selectedDbFilter == importDbFilterAllValue
+            && selectedSearchFilter == ''
+        )
+    }
 }
 
 /**Creates the error message for folders that fail pretest */
@@ -2337,7 +3246,8 @@ function setDatabaseName(path){
     databaseName = path.split('/')
     databaseName = databaseName[databaseName.length-1]
     $("#selectedDatabaseNameLeftPane").text(databaseName)
-    $("#selectDatabasePage, #homePageContainer").toggle();
+    $("#selectDatabasePage").hide()
+    $("#homePageContainer").show()
     //USWDS takes the title attribute, removes it, and takes the value to created the tooltip.
     //To update the tooltip, we must select it directly. This updates the tooltip path with the selected database path using the OS path separator.
     $("#getUserDatabaseModal>span:first-of-type>span").text(osPathSep == "\\" ? databasePath.replaceAll("/", "\\") : databasePath)    
@@ -2396,14 +3306,43 @@ async function populateDatabaseTypeDropdown(){
                 templateOptions.appendChild(option)
             }
         } else {
-            if (emptyTemplates[template].textTemplate == false) {
-                option.value = emptyTemplates[template].path
                 option.ariaLabel = template
                 option.innerHTML = template
                 templateOptions.appendChild(option)
             }
         }
+
+    const databasePathInput = document.getElementById('databaseTextBox')
+    if(databasePathInput){
+        let preferredPath = normalizeDirectoryForDatabaseCreation(databasePathInput.value)
+        const selectedDatabaseParentPath = normalizeDirectoryForDatabaseCreation(databasePath)
+        if((!preferredPath || isDriveRootUiPath(preferredPath)) && selectedDatabaseParentPath){
+            preferredPath = selectedDatabaseParentPath
+        }
+
+        const persistedParentPath = getPersistedCreateDatabaseParentFolder()
+        if(persistedParentPath){
+            const persistedPathStatus = await doesPathExist(persistedParentPath)
+            if(
+                isPathCheckUnavailable(persistedPathStatus)
+                || (Array.isArray(persistedPathStatus?.failedfolders) && persistedPathStatus.failedfolders.length == 0)
+            ){
+                if(!preferredPath || isDriveRootUiPath(preferredPath)){
+                    preferredPath = persistedParentPath
+                }
+            }
+        }
+
+        if(preferredPath){
+            databasePathInput.value = preferredPath.replaceAll('/', osPathSep)
+            databasePathInput.oldvalue = preferredPath
+
+            if(normalizeUiPath(rootPath) != preferredPath){
+                await executeFolderTreeRequest(databaseTreeViewTable.tableId, preferredPath, true)
+            }
+        }
     }
+
     document.getElementById("toggleCreateNewDBModal").click()
     // Calls displayNewDatabasePath() everytime the "Create New Database" button is clicked
     displayNewDatabasePath();
@@ -2427,12 +3366,27 @@ function normalizeDirectoryForDatabaseCreation(pathValue) {
 
     const lowerPath = normalizedPath.toLowerCase()
     const isDatabaseFilePath = Array.from(knownDbSuffixes).some(suffix => lowerPath.endsWith(suffix))
-    if (!isDatabaseFilePath) {
+    if (isDatabaseFilePath) {
+        const parentPath = normalizedPath.split('/').slice(0, -1).join('/')
+        if(parentPath){
+            return parentPath
+        }
+
         return normalizedPath
     }
 
-    const parentPath = normalizedPath.split('/').slice(0, -1).join('/')
-    return parentPath || normalizedPath
+    // If user is currently inside a generated DB folder (for example *_gpkg or *_sqlite),
+    // return the parent so the next DB is created beside it instead of nesting folders.
+    // This is intentionally a single-level climb from the current location.
+    const currentFolderName = normalizedPath.split('/').slice(-1)[0]?.toLowerCase() ?? ''
+    if(currentFolderName.endsWith('_gpkg') || currentFolderName.endsWith('_sqlite')){
+        const parentPath = normalizedPath.split('/').slice(0, -1).join('/')
+        if(parentPath){
+            return parentPath
+        }
+    }
+
+    return normalizedPath
 }
 
 /**Issue a check against various different criteria to determine if a user should be allowed to click the save button.
@@ -2442,49 +3396,43 @@ async function allowUserSaveDatabase(databaseRootPath, databaseDisplayPath){
     let preventDbCreationContainer = document.getElementById('preventDbCreationContainer');
     let createNewDbBtn = document.getElementById("createNewDbBtn");
     let createNewDatabaseName = document.getElementById('createNewDatabaseName').value
-    let folderContents
-    //Check to see if the folder we are in ends with "_gpkg" or "_sqlite". If true, do not allow the user to save
-    let inDatabaseFolder = databaseRootPath.split(/[\\/]+/).slice(-2, -1).toString()
-    inDatabaseFolder = inDatabaseFolder.includes("_gpkg") || inDatabaseFolder.includes("_sqlite")
-    let folderHasContents = false
-    //If we are in a _gpkg or _sqlite folder or if the database name is blank, we do not need to send other checks. 
-    if(!inDatabaseFolder || createNewDatabaseName == ""){
-        var goodPath = await continuePathNavigation(databaseTreeViewTableId, databaseRootPath.split(/[\/\\]+/).slice(0, -1).join("/"), false, "", true)
-        if(!goodPath){
-            return
-        }
-        let folderContentsRequest = {'request': getFolderTreeRequest, 'path': databaseRootPath, 'folderpattern' : `.*.*`, 'ignorefoldercase': true,
-        'filepattern' : `.*.*`, 'ignorefilecase': true, 'showfiles': true, 'maxdepth': 1}
-        folderContents = await fetch(url, {
-            method : 'POST',
-            headers: {'Content-Type' : 'application/json'},
-            body: JSON.stringify(folderContentsRequest)}
-        ).then(response => response.json()
-        ).then(function(response){return response})
+    let normalizedDatabaseRootPath = normalizeUiPath(databaseRootPath)
+    let normalizedDatabaseFilePath = normalizeUiPath(databaseDisplayPath)
+    let databaseDisplayPathWithOsSep = normalizedDatabaseFilePath.replaceAll('/', osPathSep)
+    let goodPath = false
+    let databaseAlreadyExists = false
 
-        folderHasContents = Array.isArray(folderContents?.nodes)
-            ? folderContents.nodes.length > 0
-            : Boolean(folderContents?.nodes)
+    if(createNewDatabaseName != ""){
+        goodPath = await continuePathNavigation(databaseTreeViewTableId, normalizedDatabaseRootPath, false, "", true)
+        if(!goodPath){
+            return false
+        }
+
+        let databasePathCheck = await doesPathExist(normalizedDatabaseFilePath)
+        if(isPathCheckUnavailable(databasePathCheck)){
+            return false
+        }
+
+        databaseAlreadyExists = Array.isArray(databasePathCheck?.failedfolders)
+            ? databasePathCheck.failedfolders.length == 0
+            : false
     }
+
+    let shouldBlockCreate = (createNewDatabaseName == "" || !goodPath || databaseAlreadyExists)
     preventDbCreationContainer.setAttribute('style', 'display: none') //Reset hide display preventDbCreationContainer
-    if(inDatabaseFolder || createNewDatabaseName == "" || !goodPath || folderHasContents ) { //Database already exists or folder contains data
-        createNewDatabaseLocation.innerHTML = databaseDisplayPath;
+
+    if(shouldBlockCreate) {
+        createNewDatabaseLocation.innerHTML = databaseDisplayPathWithOsSep;
         createNewDatabaseLocation.setAttribute('style', 'color: #E90000; font-weight: bold;') //Change text to red & bold to pass 508
         preventDbCreationContainer.setAttribute('style', 'display: block') //Display preventDbCreationContainer
     }
-    else { //The folder doesnt contain any data and the database does not exist.
-        createNewDatabaseLocation.innerHTML = databaseDisplayPath;
+    else {
+        createNewDatabaseLocation.innerHTML = databaseDisplayPathWithOsSep;
         createNewDatabaseLocation.setAttribute('style', 'color: #000000; font-weight: normal;') //Change text to black
     }
-    //Disable "Save Button" the database name is empty, the database already exists, or the folder contains other data
-    if(inDatabaseFolder || createNewDatabaseName == "" || !goodPath || folderHasContents){
-        createNewDbBtn.disabled = true
-        return false
-    }
-    else{
-        createNewDbBtn.disabled = false
-        return true
-    }
+
+    createNewDbBtn.disabled = shouldBlockCreate
+    return !shouldBlockCreate
 }
 
 /**Concatenates the user's directory, database name & extension and then displays it to the user when creating a new DB*/
@@ -2518,21 +3466,8 @@ async function displayNewDatabasePath() {
         databasePathInput.value = userDirectory.replaceAll('/', osPathSep)
     }
 
-    //Standardize the file path presented
-    userDirectory = userDirectory.split("/")
-    userDirectory = userDirectory.join(osPathSep)
-    let folderSuffix = extension.replaceAll(".", "_")
-    let databaseRootPath
-    // Build out full path & display it to the user. Also sets the databasePath global Variable
-    if(userDirectory.endsWith("\\") || userDirectory.endsWith("/")){
-        databaseRootPath = `${userDirectory}${createNewDatabaseName}${folderSuffix}`
-        var newDatabaseCreationDisplay = `${databaseRootPath}${osPathSep}${createNewDatabaseName}${extension}`;
-    }
-    else{
-        databaseRootPath = `${userDirectory}${osPathSep}${createNewDatabaseName}${folderSuffix}`
-        var newDatabaseCreationDisplay = `${databaseRootPath}${osPathSep}${createNewDatabaseName}${extension}`;
-    }
-
+    let databaseRootPath = normalizeUiPath(userDirectory)
+    let newDatabaseCreationDisplay = `${databaseRootPath}/${createNewDatabaseName}${extension}`
     allowUserSaveDatabase(databaseRootPath, newDatabaseCreationDisplay)
 }
 
@@ -2541,26 +3476,26 @@ async function createNewTemplateDatabase(template, destinationFolder, dbName, ov
     let templateValue = document.getElementById(template);
     let selectedTemplate = templateValue.options[templateValue.selectedIndex].text;
     let extension = emptyTemplates[selectedTemplate].suffix;
-    let folderPathSuffix = extension.replaceAll(".", "_")
     let dbNameValue = document.getElementById(dbName).value;
     let destinationRootValue = normalizeDirectoryForDatabaseCreation(document.getElementById(destinationFolder).value)
-    let destinationFolderValue = `${destinationRootValue}/${dbNameValue}${folderPathSuffix}`;
+    let destinationFolderValue = destinationRootValue;
     let errorMessageElement = document.getElementById("createNewDatabaseErrorMessage")
 
     document.getElementById(destinationFolder).value = destinationRootValue.replaceAll('/', osPathSep)
 
     destinationFolderValue = destinationFolderValue.replaceAll("\\", "/") //Send folder path using / to prevent errors on the python side
     databasePath = destinationFolderValue + "/" + dbNameValue + extension; //set the global databasePath variable
-    let allowUserToSave = await allowUserSaveDatabase(destinationFolderValue, `${destinationFolderValue.replaceAll("/", osPathSep)}${osPathSep}${dbNameValue}${extension}`)
+    let allowUserToSave = await allowUserSaveDatabase(destinationFolderValue, databasePath)
     if(allowUserToSave){
-        BrowserStorage.setLocalStorage(databaseTableRequest, destinationFolderValue)
+        BrowserStorage.setLocalStorage(databaseTableRequest, destinationRootValue)
+        setPersistedCreateDatabaseParentFolder(destinationRootValue)
 
         var createNewDatabase = {'request' : copyTemplateFileRequest, 'templatename' : selectedTemplate, 'folder' : destinationFolderValue,
             'filename' : dbNameValue, 'overwrite' : overwrite}
         let response = await sendData(createNewDatabase) // Creates new Database
         //Check status of response.
         if (response && response.status) {
-            selectDatabase(destinationFolderValue, databasePath) // Sets newly created database as the Selected Database
+            selectDatabase(destinationRootValue, databasePath) // Sets newly created database as the Selected Database
             document.getElementById('helpPaneContainer').setAttribute("style", "display: none") //close the help menu if it was open before navigating away
             if(document.getElementById("createNewDatabaseModal").classList.contains("is-visible")){
                 document.getElementById("toggleCreateNewDBModal").click()
@@ -3970,15 +4905,11 @@ window.onload = async function(){
 
     try {
         await initializeModules();
-        await fetch(
-            "/serverStatus", {method: 'HEAD'}
-        ).then(response => {
-            if(!response.ok){
-                $('#serverClosedModal').modal("show")
-            }}
-        ).catch(function(){
-            $('#serverClosedModal').modal("show")
-        })
+        const serverAvailable = await confirmServerAvailability()
+        if(!serverAvailable){
+            sendLoggerWarning('Startup server availability check failed after retries')
+            throw new Error('Startup server availability check failed after retries')
+        }
         checkInternetConnection().catch(() => false)
         if (!RasterFunctions || !DatabaseFunctions || !DownloaderFunctions) {
             throw new Error('Startup modules failed to initialize')
@@ -4028,6 +4959,10 @@ window.onload = async function(){
         finishLoading()
     }
 }
+
+setInterval(() => {
+    recoverServerClosedModalIfServerIsAvailable().catch(() => {})
+}, 2000)
 
 
 /**Used to select all checkboxes.*/

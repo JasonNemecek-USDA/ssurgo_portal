@@ -1,0 +1,37 @@
+{
+  "timestamp": "2026-06-11 13:12:56",
+  "runtimeVersion": "1.0.0.120",
+  "database": "C:/Users/Jason.L.Nemecek/Box/github/JasonNemecek-USDA/ssurgo_portal/tmp/agent/e2e/SSURGO_NATIONAL_CHECKPOINT_20260611_131159.gpkg",
+  "root": "C:/Users/Jason.L.Nemecek/Downloads/SSURGO",
+  "quickPretestMs": 194,
+  "quickPretestMode": "indexed",
+  "totalCandidates": 3367,
+  "validCandidateCount": 3367,
+  "sampleCount": 8,
+  "batchSize": 4,
+  "importTotalSeconds": 55.88,
+  "projectedTotalSeconds": 23518.5,
+  "projectedTotalMinutes": 391.98,
+  "meetsThirtyMinuteGoal": false,
+  "totalFolderFailures": 0,
+  "batchMetrics": [
+    {
+      "batchIndex": 1,
+      "batchSize": 4,
+      "elapsedSeconds": 40.39,
+      "performhousekeeping": false,
+      "updatembrthisbatch": true,
+      "status": true,
+      "failedSubfolders": 0
+    },
+    {
+      "batchIndex": 2,
+      "batchSize": 4,
+      "elapsedSeconds": 15.47,
+      "performhousekeeping": true,
+      "updatembrthisbatch": true,
+      "status": true,
+      "failedSubfolders": 0
+    }
+  ]
+}

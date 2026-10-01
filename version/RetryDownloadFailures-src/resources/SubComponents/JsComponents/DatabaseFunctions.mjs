@@ -12,9 +12,28 @@ export default class DatabaseFunctions{
         this.successCounter = 0
         this.databaseTable = null
         this.importTable = null
+        this.stopActionHandler = null
+        this.deleteInProgress = false
+        this.importInProgress = false
+        this.deleteClickHandler = null
+        this.importClickHandler = null
+    }
+
+    replaceStopActionListener(handler){
+        if(this.stopActionHandler){
+            this.progressDisplayComp.removeEventListener("onStopAction", this.stopActionHandler)
+        }
+        this.stopActionHandler = handler
+        this.progressDisplayComp.addEventListener("onStopAction", this.stopActionHandler)
     }
 
     async deleteCandidates(){
+        if(this.deleteInProgress){
+            return
+        }
+
+        this.deleteInProgress = true
+        try{
         //set values
         let stopProgress = false
         const subfolders = this.databaseTable.selectedCheckboxes
@@ -23,8 +42,9 @@ export default class DatabaseFunctions{
         if(!continueDelete){
             return
         }
-        this.progressDisplayComp.removeEventListener("onStopAction", e => {stopProgress=true});
-        this.progressDisplayComp.addEventListener("onStopAction", e => {stopProgress=true});
+        this.replaceStopActionListener(() => {
+            stopProgress = true
+        })
 
         this.progressDisplayComp.progressTitle = "Deleting data...";
         this.progressDisplayComp.progressCounterMessage = `0 out of ${subfolders.length} records deleted`;
@@ -76,9 +96,20 @@ export default class DatabaseFunctions{
         $("#selectDatabasePage, #homePageContainer").toggle();
         this.databaseTable.selectedCheckboxes = [];
         await selectDatabase(this.databasePath.slice(0, (-this.databaseName.length - 1)), this.databasePath);        
+        }
+        finally{
+            this.deleteInProgress = false
+        }
     }
 
     async importCandidates(skipPretest = true,  loadInSpatialOrder = false, loadspatialdatawithinsubprocess = false, isDissolve = true, includeSubRules = false){
+        if(this.importInProgress){
+            this.progressDisplayComp.populateErrorMessage("Import already in progress. Wait for the current run to finish.")
+            return
+        }
+
+        this.importInProgress = true
+        try{
         //set values
         let stopProgress = false;
         let subfolders = this.importTable.selectedCheckboxes;
@@ -103,6 +134,10 @@ export default class DatabaseFunctions{
             selectedFolderPaths.push(`${this.folderPath}/${subfolders[folder]}`)
         }
         deletedFolders = await doesPathExist(selectedFolderPaths)
+        if(deletedFolders?.status === "server_unavailable"){
+            this.progressDisplayComp.populateErrorMessage("Unable to connect to the local portal server. Confirm SSURGO Portal is still running, then retry import.")
+            return
+        }
         if(deletedFolders["failedfolders"].length != 0){
             document.getElementById('missingObjectModalBtn').click()
             //Clear any active listeners
@@ -147,8 +182,9 @@ export default class DatabaseFunctions{
         if(overrideExistingSSA && overrideDiffDataSources){
             // // call progressDisplay class constructor to define elements
     
-            this.progressDisplayComp.removeEventListener("onStopAction", e => {stopProgress=true});
-            this.progressDisplayComp.addEventListener("onStopAction", e => {stopProgress=true});
+            this.replaceStopActionListener(() => {
+                stopProgress = true
+            })
             this.progressDisplayComp.progressTitle = "Importing data...";
             this.progressDisplayComp.progressCounterMessage = `0 out of ${subfolders.length} imports loaded`;
             this.progressDisplayComp.progressListButtonText = "Click to see list of imported areas";        
@@ -187,51 +223,417 @@ export default class DatabaseFunctions{
             isDissolve = !document.getElementById('dissolve').checked
             includeSubRules = document.getElementById('includeInterpretationSubRules').checked
             let doGenerateRasters = document.getElementById('generateRaster').checked
-            for(let folder in subfolders){
-                /*Stop button has a function. This function sets a global variable that will need to be reset at the end of the cancelation*/
-                if(!stopProgress){
-                    if(
-                        //If not generating rasters OR performing the last import, hide the stop button
-                        (folder == subfolders.length -1 && !doGenerateRasters) || 
-                        (folder == subfolders.length && doGenerateRasters)
-                    ){
-                        this.progressDisplayComp._hideStopButton = true
-                    }
-                    this.progressDisplayComp.progressText = `Importing ${subfolders[folder]} into your database...`;                
-                    let request = {
-                        'request': importCandidatesRequest, 'database': this.databasePath, 'root' : this.folderPath, 'skippretest': skipPretest, 'istabularonly': this.isTabularOnly, 'loadinspatialorder' : loadInSpatialOrder,
-                        'loadspatialdatawithinsubprocess' : loadspatialdatawithinsubprocess, 'dissolvemupolygon' : isDissolve, 'subfolders' : [subfolders[folder]], 'includeinterpretationsubrules' : includeSubRules
-                    }
-                    let response = await sendRequest(request)
-                    if(!response){
-                        const errorfolder = subfolders[folder].replaceAll(" ", "%20")
-                        fetch("http://localhost:8083/tlogger/warning:empty%20response%20for%20import%20candidates%20"+errorfolder)
+            const processedFolders = new Set()
+            const isLargeImport = subfolders.length >= 300
+            const isNationalScaleImport = subfolders.length >= 3000
+            const maxSingleFallbackRetries = isLargeImport ? 8 : 20
+            const waitForDelay = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs))
+            const isLockMessage = (message) => /database is locked|locked/i.test(String(message ?? ""))
+            const determineImportBatchSize = (folderCount) => {
+                if(folderCount >= 3000){
+                    return 192
+                }
+                if(folderCount >= 2000){
+                    return 160
+                }
+                if(folderCount >= 1200){
+                    return 128
+                }
+                if(folderCount >= 800){
+                    return 96
+                }
+                if(folderCount >= 300){
+                    return 64
+                }
+                if(folderCount >= 120){
+                    return 48
+                }
+                return 24
+            }
+            const importBatchSize = determineImportBatchSize(subfolders.length)
+            const importOptimizerProfile = isNationalScaleImport ? "national" : "balanced"
+            const shouldUseSpatialSubprocess = !this.isTabularOnly && (loadspatialdatawithinsubprocess || isNationalScaleImport)
+            const updateMbrEveryBatches = isNationalScaleImport ? 6 : 1
+            const adaptiveBatchMinSize = isNationalScaleImport ? 48 : 24
+            const adaptiveBatchMaxSize = isNationalScaleImport ? 256 : Math.max(importBatchSize, 96)
+            const adaptiveTargetBatchMs = isNationalScaleImport ? 30000 : 18000
+            let currentImportBatchSize = importBatchSize
+            let activeBatchFolders = new Set()
+
+            if(isNationalScaleImport && shouldUseSpatialSubprocess && !loadspatialdatawithinsubprocess){
+                this.progressDisplayComp.populateErrorMessage(
+                    "Performance mode enabled for national-scale import: spatial subprocess mode was auto-enabled to improve throughput."
+                )
+            }
+
+            const normalizeAdaptiveBatchSize = (requestedSize) => {
+                const boundedSize = Math.max(adaptiveBatchMinSize, Math.min(adaptiveBatchMaxSize, Number(requestedSize) || importBatchSize))
+                const alignedSize = Math.round(boundedSize / 8) * 8
+                return Math.max(adaptiveBatchMinSize, Math.min(adaptiveBatchMaxSize, alignedSize))
+            }
+
+            const updateAdaptiveBatchSize = (batchElapsedMs, completedInBatch, hadBatchFailure, wasLockFailure = false) => {
+                if(hadBatchFailure || wasLockFailure){
+                    currentImportBatchSize = normalizeAdaptiveBatchSize(Math.floor(currentImportBatchSize * 0.7))
+                    return
+                }
+
+                const safeCompletedCount = Math.max(completedInBatch, 1)
+                const millisPerFolder = batchElapsedMs / safeCompletedCount
+                const projectedTargetSize = adaptiveTargetBatchMs / Math.max(millisPerFolder, 1)
+                const smoothedTarget = Math.round((currentImportBatchSize * 0.6) + (projectedTargetSize * 0.4))
+
+                if(batchElapsedMs > adaptiveTargetBatchMs * 1.6){
+                    currentImportBatchSize = normalizeAdaptiveBatchSize(Math.min(currentImportBatchSize, Math.floor(smoothedTarget * 0.8)))
+                    return
+                }
+
+                if(batchElapsedMs < adaptiveTargetBatchMs * 0.6 && completedInBatch >= currentImportBatchSize){
+                    currentImportBatchSize = normalizeAdaptiveBatchSize(Math.max(smoothedTarget, currentImportBatchSize + 8))
+                    return
+                }
+
+                currentImportBatchSize = normalizeAdaptiveBatchSize(smoothedTarget)
+            }
+
+            if(isLargeImport && !this.isTabularOnly && isDissolve){
+                // Large full-spatial imports are significantly faster when dissolve is disabled.
+                isDissolve = false
+                this.progressDisplayComp.populateErrorMessage(
+                    "Performance mode enabled for large import: Disable Dissolve was auto-enabled to improve throughput."
+                )
+            }
+
+            const updateImportCounterMessage = () => {
+                const completedCount = this.successCounter + this.failedCounter
+                const inProgressCount = activeBatchFolders.size
+                const queuedCount = Math.max(subfolders.length - completedCount - inProgressCount, 0)
+                this.progressDisplayComp.progressCounterMessage = `${completedCount} out of ${subfolders.length} imports processed. ${this.successCounter} loaded, ${this.failedCounter} failed. ${inProgressCount} in progress, ${queuedCount} queued.`
+            }
+
+            const isFatalImportErrorMessage = (message) => /database disk image is malformed/i.test(String(message ?? ""))
+            let encounteredFatalImportError = false
+            let fatalImportErrorMessage = ""
+            const stopImportForFatalDatabaseError = (remainingFolders) => {
+                const stopMessage = "Import stopped because the target database is malformed. Create/select a new database and re-run import."
+                for(const folderName of remainingFolders){
+                    markFolderFailure(folderName, stopMessage)
+                }
+                this.progressDisplayComp.populateErrorMessage(stopMessage)
+                stopProgress = true
+            }
+
+            const normalizeErrorMessage = (rawMessage, defaultMessage = "An unknown error occurred while importing this folder.") => {
+                const msg = String(rawMessage ?? "").trim()
+                return msg || defaultMessage
+            }
+
+            const markFolderSuccess = (folderName) => {
+                if(processedFolders.has(folderName)){
+                    return
+                }
+                processedFolders.add(folderName)
+                activeBatchFolders.delete(folderName)
+                successfulFolders.push(folderName)
+                this.successCounter++
+                this.progressDisplayComp.successValue = this.successCounter
+                updateImportCounterMessage()
+            }
+
+            const markFolderFailure = (folderName, errormessage) => {
+                if(processedFolders.has(folderName)){
+                    return
+                }
+                processedFolders.add(folderName)
+                activeBatchFolders.delete(folderName)
+                const errorData = {"areaname": folderName, "errormessage": normalizeErrorMessage(errormessage)}
+                failedFolders.push(errorData)
+                if(!encounteredFatalImportError && isFatalImportErrorMessage(errorData.errormessage)){
+                    encounteredFatalImportError = true
+                    fatalImportErrorMessage = errorData.errormessage
+                }
+                this.failedCounter++
+                this.progressDisplayComp.failValue = this.failedCounter
+                updateImportCounterMessage()
+                this.progressDisplayComp.populateErrorMessage(`${folderName} Error Message: ${errorData.errormessage}`)
+            }
+
+            const setActiveBatchFolders = (folderBatch) => {
+                activeBatchFolders = new Set(folderBatch.filter((folderName) => !processedFolders.has(folderName)))
+                updateImportCounterMessage()
+            }
+
+            const applyBatchResponse = (responsePayload) => {
+                const processedInResponse = new Set()
+                const responseSubfolders = Array.isArray(responsePayload?.subfolders) ? responsePayload.subfolders : []
+                for(const subfolderResponse of responseSubfolders){
+                    const folderName = subfolderResponse?.childfoldername
+                    if(!folderName){
                         continue
                     }
-                    //Response is good
-                    if (response.status){
-                        successfulFolders.push(subfolders[folder])
-    
-                        this.progressDisplayComp.successValue++;                         
-                        this.progressDisplayComp.progressCounterMessage = `${this.progressDisplayComp.successValue} out of ${subfolders.length} imports loaded. ${this.failedCounter} imports failed.`;                    
-    
+
+                    processedInResponse.add(folderName)
+                    const folderError = String(subfolderResponse?.errormessage ?? "").trim()
+                    if(folderError){
+                        markFolderFailure(folderName, folderError)
                     }
-                    //If the import response has a status of false
                     else{
-                        let errorData = {"areaname": subfolders[folder], "errormessage": response.errormessage}
-                        failedFolders.push(errorData)
-    
-                        this.progressDisplayComp.failValue++;                     
-                        this.progressDisplayComp.progressCounterMessage = `${this.progressDisplayComp.successValue} out of ${subfolders.length} imports loaded. ${this.progressDisplayComp.failValue} imports failed.`;                           
-                        this.progressDisplayComp.populateErrorMessage(`${subfolders[folder]} Error Message: ${response.errormessage}`);      
+                        markFolderSuccess(folderName)
                     }
                 }
-                //Import process stopped
-                else{
-                    echo('Stopped import')
+
+                return {processedInResponse, responseSubfolders}
+            }
+
+            const buildImportRequest = (folderBatch, performHousekeeping, updateMbrThisBatch) => {
+                return {
+                    'request': importCandidatesRequest, 'database': this.databasePath, 'root' : this.folderPath, 'skippretest': skipPretest, 'istabularonly': this.isTabularOnly, 'loadinspatialorder' : loadInSpatialOrder,
+                    'loadspatialdatawithinsubprocess' : shouldUseSpatialSubprocess, 'dissolvemupolygon' : isDissolve, 'subfolders' : folderBatch, 'includeinterpretationsubrules' : includeSubRules,
+                    'performhousekeeping' : performHousekeeping,
+                    'importoptimizerprofile' : importOptimizerProfile,
+                    'updatembrthisbatch' : updateMbrThisBatch
+                }
+            }
+
+            const buildTransportFailureResponse = (errormessage) => {
+                return {
+                    status: false,
+                    transporterror: true,
+                    errormessage: normalizeErrorMessage(errormessage, "Unable to connect to the local portal server."),
+                    subfolders: []
+                }
+            }
+
+            const safeImportRequest = async (requestPayload) => {
+                try{
+                    const responsePayload = await sendRequest(requestPayload)
+                    if(responsePayload){
+                        return responsePayload
+                    }
+                    return buildTransportFailureResponse("No response received from the local portal server.")
+                }
+                catch(requestError){
+                    return buildTransportFailureResponse(requestError?.message)
+                }
+            }
+
+            const isTransportFailureResponse = (responsePayload) => Boolean(responsePayload?.transporterror)
+            const transportStopMessage = "Import stopped because the local portal server became unavailable."
+            const maxConsecutiveTransportFailures = 2
+            let consecutiveTransportFailures = 0
+
+            let batchStart = 0
+            let batchIndex = 0
+            while(batchStart < subfolders.length){
+                if(stopProgress){
+                    console.log('Stopped import')
                     break
                 }
-            }    
+
+                currentImportBatchSize = normalizeAdaptiveBatchSize(currentImportBatchSize)
+                const batchSubfolders = subfolders.slice(batchStart, batchStart + currentImportBatchSize)
+                const isLastBatch = (batchStart + batchSubfolders.length) >= subfolders.length
+                if(isLastBatch && !doGenerateRasters){
+                    this.progressDisplayComp._hideStopButton = true
+                }
+
+                setActiveBatchFolders(batchSubfolders)
+                const estimatedBatchCount = Math.max(1, Math.ceil((subfolders.length - batchStart) / currentImportBatchSize) + batchIndex)
+                batchIndex++
+                const shouldUpdateMbrThisBatch = this.isTabularOnly ? false : (isLastBatch || (batchIndex % updateMbrEveryBatches === 0))
+
+                const batchLabel = batchSubfolders.length > 1
+                    ? `${batchSubfolders[0]} (+${batchSubfolders.length - 1} more)`
+                    : batchSubfolders[0]
+                this.progressDisplayComp.progressText = `Importing batch ${batchIndex} of ~${estimatedBatchCount}: ${batchLabel} into your database...`
+
+                const shouldPerformHousekeeping = isLastBatch
+                const batchStartedAt = Date.now()
+                const response = await safeImportRequest(buildImportRequest(batchSubfolders, shouldPerformHousekeeping, shouldUpdateMbrThisBatch))
+                const batchElapsedMs = Math.max(1, Date.now() - batchStartedAt)
+                const completedBeforeFallback = this.successCounter + this.failedCounter
+                if(isTransportFailureResponse(response)){
+                    consecutiveTransportFailures++
+                    const transportError = normalizeErrorMessage(response?.errormessage, "Unable to connect to the local portal server.")
+                    for(const folderName of batchSubfolders){
+                        markFolderFailure(folderName, transportError)
+                    }
+
+                    if(consecutiveTransportFailures >= maxConsecutiveTransportFailures){
+                        const remainingFolders = subfolders.slice(batchStart + batchSubfolders.length)
+                        for(const folderName of remainingFolders){
+                            markFolderFailure(folderName, `${transportStopMessage} Re-run import after the server connection is restored.`)
+                        }
+                        this.progressDisplayComp.populateErrorMessage(`${transportStopMessage} Imported folders already completed were preserved.`)
+                        stopProgress = true
+                        break
+                    }
+
+                    updateAdaptiveBatchSize(batchElapsedMs, this.successCounter + this.failedCounter - completedBeforeFallback, true, false)
+                    batchStart += batchSubfolders.length
+                    continue
+                }
+
+                consecutiveTransportFailures = 0
+
+                const {processedInResponse, responseSubfolders} = applyBatchResponse(response)
+                let batchHadFailure = !response.status
+                let batchHadLockFailure = false
+
+                if(!response.status){
+                    const batchErrorMessage = normalizeErrorMessage(
+                        response?.errormessage ?? response?.message,
+                        "Import candidates request failed."
+                    )
+
+                    for(const folderName of batchSubfolders){
+                        if(!processedFolders.has(folderName)){
+                            markFolderFailure(folderName, batchErrorMessage)
+                        }
+                    }
+
+                    // Do not fan out fallback requests when the batch request itself failed.
+                    // This prevents request storms when the database is busy/locked.
+                    if(isLockMessage(batchErrorMessage)){
+                        batchHadLockFailure = true
+                        await waitForDelay(250)
+                    }
+
+                    if(isFatalImportErrorMessage(batchErrorMessage)){
+                        const remainingGlobalFolders = subfolders.slice(batchStart + batchSubfolders.length)
+                        stopImportForFatalDatabaseError(remainingGlobalFolders)
+                        break
+                    }
+
+                    updateAdaptiveBatchSize(batchElapsedMs, this.successCounter + this.failedCounter - completedBeforeFallback, batchHadFailure, batchHadLockFailure)
+                    batchStart += batchSubfolders.length
+                    continue
+                }
+
+                const unprocessedFolders = batchSubfolders.filter(folderName => !processedInResponse.has(folderName) && !processedFolders.has(folderName))
+                if(encounteredFatalImportError){
+                    const remainingGlobalFolders = subfolders.slice(batchStart + batchSubfolders.length)
+                    this.progressDisplayComp.populateErrorMessage(`Import aborted due to fatal database error: ${fatalImportErrorMessage}`)
+                    stopImportForFatalDatabaseError(remainingGlobalFolders)
+                    break
+                }
+
+                if(response.status && responseSubfolders.length === 0){
+                    this.progressDisplayComp.populateErrorMessage(
+                        "Import response did not include per-folder statuses; retrying unresolved folders."
+                    )
+                }
+
+                if(unprocessedFolders.length > 0){
+                    let remainingFolders = [...unprocessedFolders]
+                    batchHadFailure = true
+
+                    if(remainingFolders.length > 1){
+                        const retryLabel = `${remainingFolders[0]} (+${remainingFolders.length - 1} more)`
+                        this.progressDisplayComp.progressText = `Retrying ${retryLabel} in a single performance batch...`
+
+                        const bulkRetryResponse = await safeImportRequest(buildImportRequest(remainingFolders, isLastBatch, shouldUpdateMbrThisBatch))
+                        if(isTransportFailureResponse(bulkRetryResponse)){
+                            const bulkTransportError = normalizeErrorMessage(
+                                bulkRetryResponse?.errormessage,
+                                "Unable to connect to the local portal server."
+                            )
+                            for(const folderName of remainingFolders){
+                                markFolderFailure(folderName, bulkTransportError)
+                            }
+
+                            const remainingGlobalFolders = subfolders.slice(batchStart + batchSubfolders.length)
+                            for(const pendingGlobalFolder of remainingGlobalFolders){
+                                markFolderFailure(
+                                    pendingGlobalFolder,
+                                    `${transportStopMessage} Re-run import after the server connection is restored.`
+                                )
+                            }
+
+                            remainingFolders = []
+                            stopProgress = true
+                            this.progressDisplayComp.populateErrorMessage(`${transportStopMessage} Imported folders already completed were preserved.`)
+                        }
+                        else{
+                            const bulkProcessed = applyBatchResponse(bulkRetryResponse).processedInResponse
+                            remainingFolders = remainingFolders.filter(folderName => !bulkProcessed.has(folderName) && !processedFolders.has(folderName))
+
+                            if(!bulkRetryResponse.status){
+                                const bulkRetryError = normalizeErrorMessage(
+                                    bulkRetryResponse?.errormessage ?? bulkRetryResponse?.message,
+                                    "Import candidates retry request failed."
+                                )
+                                if(isLockMessage(bulkRetryError)){
+                                    batchHadLockFailure = true
+                                }
+                                for(const folderName of remainingFolders){
+                                    markFolderFailure(folderName, bulkRetryError)
+                                }
+                                remainingFolders = []
+                            }
+                        }
+                    }
+
+                    if(remainingFolders.length > 0){
+                        const fallbackFolders = remainingFolders.slice(0, maxSingleFallbackRetries)
+                        const skippedFolders = remainingFolders.slice(maxSingleFallbackRetries)
+
+                        if(skippedFolders.length > 0){
+                            const skippedRetryError = `Performance mode capped one-by-one retries to ${maxSingleFallbackRetries} folders in this batch. Re-run remaining failed folders if needed.`
+                            for(const folderName of skippedFolders){
+                                markFolderFailure(folderName, skippedRetryError)
+                            }
+                        }
+
+                        for(let fallbackIndex = 0; fallbackIndex < fallbackFolders.length; fallbackIndex++){
+                            const folderName = fallbackFolders[fallbackIndex]
+                            if(stopProgress){
+                                console.log('Stopped import')
+                                break
+                            }
+
+                            this.progressDisplayComp.progressText = `Importing ${folderName} into your database...`
+                            const isFinalFallback = isLastBatch && folderName === fallbackFolders.at(-1)
+                            const fallbackResponse = await safeImportRequest(buildImportRequest([folderName], isFinalFallback, shouldUpdateMbrThisBatch))
+                            if(!isTransportFailureResponse(fallbackResponse) && fallbackResponse.status){
+                                markFolderSuccess(folderName)
+                            }
+                            else{
+                                const fallbackError = fallbackResponse?.errormessage ?? response.errormessage
+                                markFolderFailure(folderName, fallbackError)
+                                if(isTransportFailureResponse(fallbackResponse)){
+                                    const remainingFallbackFolders = fallbackFolders.slice(fallbackIndex + 1)
+                                    for(const pendingFallbackFolder of remainingFallbackFolders){
+                                        markFolderFailure(
+                                            pendingFallbackFolder,
+                                            `${transportStopMessage} Re-run import after the server connection is restored.`
+                                        )
+                                    }
+
+                                    const remainingGlobalFolders = subfolders.slice(batchStart + batchSubfolders.length)
+                                    for(const pendingGlobalFolder of remainingGlobalFolders){
+                                        markFolderFailure(
+                                            pendingGlobalFolder,
+                                            `${transportStopMessage} Re-run import after the server connection is restored.`
+                                        )
+                                    }
+
+                                    stopProgress = true
+                                    this.progressDisplayComp.populateErrorMessage(`${transportStopMessage} Imported folders already completed were preserved.`)
+                                    break
+                                }
+                                if(isLockMessage(fallbackError)){
+                                    batchHadLockFailure = true
+                                    await waitForDelay(200)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                updateAdaptiveBatchSize(batchElapsedMs, this.successCounter + this.failedCounter - completedBeforeFallback, batchHadFailure, batchHadLockFailure)
+                batchStart += batchSubfolders.length
+            }
             //hack for homePageContainer to show after import
             $("#selectDatabasePage, #homePageContainer").toggle();
             await selectDatabase(this.databasePath.slice(0, (-this.databaseName.length - 1)), this.databasePath)
@@ -268,13 +670,6 @@ export default class DatabaseFunctions{
                 //If the import response has a status of false
                 else{
                     success = false;
-                    //Not tested prior to 8/30/2024 "demo" version
-                    if(response){
-                        fetch('http://localhost:8083/tlogger/warning:'+response['errormessage'])
-                    }
-                    else{
-                        fetch('http://localhost:8083/tlogger/warning:empty%20response%20for%20raster%20generation')
-                    }    
                     this.progressDisplayComp.progressTitle = "Raster creation failed.";
                     this.progressDisplayComp.progressText = "Raster creation failed, however the listed folders have successfully been imported.";
                     this.progressDisplayComp.progressCounterMessage = "";    
@@ -301,21 +696,33 @@ export default class DatabaseFunctions{
     
             }
         }
+        }
+        finally{
+            this.importInProgress = false
+        }
     }
 
     setupListeners(){
         const deleteBtn = document.getElementById("deleteBtn")
         if (deleteBtn){
-            deleteBtn.addEventListener("click", ()=>{
-                this.deleteCandidates()
-            })
+            if(!this.deleteClickHandler){
+                this.deleteClickHandler = ()=>{
+                    this.deleteCandidates()
+                }
+            }
+            deleteBtn.removeEventListener("click", this.deleteClickHandler)
+            deleteBtn.addEventListener("click", this.deleteClickHandler)
         }
 
         const importBtn = document.getElementById("importBtn")
         if (importBtn){
-            importBtn.addEventListener("click", ()=>{
-                this.importCandidates()
-            })
+            if(!this.importClickHandler){
+                this.importClickHandler = ()=>{
+                    this.importCandidates()
+                }
+            }
+            importBtn.removeEventListener("click", this.importClickHandler)
+            importBtn.addEventListener("click", this.importClickHandler)
         }
     }
 

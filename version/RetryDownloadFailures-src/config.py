@@ -56,7 +56,7 @@ static_config = {
     },
 
     "versionInformation": {
-        'ApplicationVersion': '1.0.0.118',
+        'ApplicationVersion': '1.0.0.120',
         'SQLiteSSURGOTemplateVersion': '1.0.0', #Needs to be manually updated by a developer (doesn't change often). All templates will have the same version. This is the version number of the SQLiteSSURGOTemplate that's included in the Project.
         'SSURGOVersion': '2.3.3' #Needs to be manually updated by a developer (doesn't change often). This is the SSURGO database model version used to create the SSURGO template database schema. This value needs to match what we have in the 'systemtemplateinformation' table inside the template database. This version also aligns with the version.txt file inside Tabular folders. 
     },
@@ -77,9 +77,20 @@ static_config = {
     #Flag to turn on printing of times it takes to run different functions of the application.
     "enableTimeTrials": False,
 
+    # Apply faster SQLite pragmas during import workflows (higher throughput, lower crash durability while importing).
+    "enableFastImportPragmas": True,
+
     # Retry controls for SSURGO bulk download unzip/download failures.
     "bulkDownloadRetryAttempts": 3,
     "bulkDownloadRetryDelaySeconds": 20,
+
+    # SQLite lock handling for imports and other write-heavy operations.
+    "sqliteConnectTimeoutSeconds": 60,
+    "sqliteBusyTimeoutMs": 60000,
+
+    # Import throughput tuning for large nationwide runs.
+    "tabularInsertChunkSize": 4000,
+    "enableSdvSignatureCache": True,
 
     # Cap concurrent survey downloads to improve throughput consistency.
     "bulkDownloadMaxThreads": 8

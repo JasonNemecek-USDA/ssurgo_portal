@@ -278,6 +278,7 @@ def initializeLogging(runmode):
     logFilename = f'{__name__}_{modeFragment}_log.log'
     filename = os.path.join(logHead, logFilename)
     template_logger.initializeLogger(filename, logging.DEBUG)
+    print(f'Logging to: {filename}', flush=True)
     versionInfo = config.get("versionInformation")
     tlogger.info(f'Log {filename} started. ApplicationVersion: {versionInfo["ApplicationVersion"]}; SQLiteSSURGOTemplateVersion: {versionInfo["SQLiteSSURGOTemplateVersion"]}; SSURGOVersion: {versionInfo["SSURGOVersion"]}')
 

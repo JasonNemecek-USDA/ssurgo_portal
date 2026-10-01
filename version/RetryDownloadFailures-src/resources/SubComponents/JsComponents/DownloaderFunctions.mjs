@@ -48,27 +48,33 @@ export default class DownloaderFunctions{
             this.mouseOverPointInPolygon(this.mapIt.shapefileFeatureGroup, e);
         })
 
-        this.mapIt._map.on("zoomend", (e)=> { 
-            this.mapIt.mapLayerSSA.setStyle((e)=> {
-                if (this.selectedRegions.includes(e.properties.areasymbol)) {
-                    return {
-                        fillOpacity: 0.5,
-                        weight: this.mapIt.calculateBorderWeight(),
-                        fillColor: '#FFD580',
-                        color: 'black' 
+        this.mapIt._map.on("zoomend", ()=> {
+            const borderWeight = this.mapIt.calculateBorderWeight();
+
+            if(this.mapIt.mapLayerSSA?.setStyle){
+                this.mapIt.mapLayerSSA.setStyle((feature)=> {
+                    if (this.selectedRegions.includes(feature.properties.areasymbol)) {
+                        return {
+                            fillOpacity: 0.5,
+                            weight: borderWeight,
+                            fillColor: '#FFD580',
+                            color: 'black'
+                        }
                     }
-                } else {
+
                     return {
                         fillOpacity: 0,
-                        weight: this.mapIt.calculateBorderWeight(),
-                        color: 'darkgray' 
+                        weight: borderWeight,
+                        color: 'darkgray'
                     }
-                }
-            });
-            this.mapIt.stateLayer.setStyle({
-                    weight: this.mapIt.calculateBorderWeight() * 3
-                }
-            );
+                });
+            }
+
+            if(this.mapIt.stateLayer?.setStyle){
+                this.mapIt.stateLayer.setStyle({
+                    weight: borderWeight * 3
+                });
+            }
         });
     }
     comboBoxEvent(event){
@@ -431,6 +437,14 @@ export default class DownloaderFunctions{
                 if(DownloaderFunctions.enableVerboseWorkerLogs){
                     console.log("download governor", this.latestGovernorState);
                 }
+                break;
+            }
+            case "download-profile": {
+                const requestedProfile = String(e.data?.requestedProfile ?? 'auto');
+                const activeProfile = String(e.data?.activeProfile ?? 'balanced');
+                fetch('/tlogger/info:' + encodeURIComponent(
+                    `Worker download profile requested=${requestedProfile} active=${activeProfile}`
+                )).catch(() => {});
                 break;
             }
             case "urls-set":
@@ -913,6 +927,15 @@ export default class DownloaderFunctions{
         document.getElementById('downloadBtn').disabled = false;
     }
 
+    static normalizeDownloadProfile(profileName){
+        const normalized = String(profileName ?? '').trim().toLowerCase();
+        if(normalized === 'turbo' || normalized === 'balanced' || normalized === 'constrained' || normalized === 'auto'){
+            return normalized;
+        }
+
+        return 'auto';
+    }
+
     async downloadCandidates(){
 
         this.successAreas = [];
@@ -971,7 +994,17 @@ export default class DownloaderFunctions{
         progressDisplayComp.progressCounterMessage = `0 out of ${areaSymbols.length} Survey Areas downloaded`;
         progressDisplayComp.progressScreenSetup(areaSymbols, 'download');    
 
-        DownloaderFunctions.worker.postMessage({command: 'download', destination: folderPath, overwrite: overwriteflg, areaSymbols: areaSymbols});
+        const selectedDownloadProfile = DownloaderFunctions.normalizeDownloadProfile(
+            BrowserStorage.getLocalStorage('download_profile')
+        );
+
+        DownloaderFunctions.worker.postMessage({
+            command: 'download',
+            destination: folderPath,
+            overwrite: overwriteflg,
+            areaSymbols: areaSymbols,
+            downloadProfile: selectedDownloadProfile,
+        });
         //Clear any active listeners
         $("#downloadToImportTable").off()
         $("#downloadToImportTable").on("click", () => {ImportActivities.downloadToImportTable(folderPath)})
@@ -1029,7 +1062,7 @@ export default class DownloaderFunctions{
             maxZoom: 19,
             attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(this.mapIt._map);
 
-        await fetch('static/StateAndIslandBoundaries_wgs84.geojson')
+        await fetch('/static/StateAndIslandBoundaries_wgs84.geojson')
         .then(response => response.json())
         .then(geojsonStates => {
             this.mapIt.stateLayer = ""

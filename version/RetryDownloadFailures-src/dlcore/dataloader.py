@@ -12,6 +12,7 @@ import os
 
 import time
 import json
+import re
 try:
     from osgeo import ogr, osr, gdal
     import dbf
@@ -22,7 +23,7 @@ except:
 import sqlite3
 from template_logger import tlogger
 import traceback
-from typing import Tuple, Dict
+from typing import Tuple, Dict, List, Optional, Set
 from datetime import datetime
 import config
 
@@ -69,6 +70,199 @@ def intersectingZones(debug = None):
 class dataloader:
 
     @staticmethod
+    def _applyFastImportPragmas(conn: sqlite3.Connection) -> None:
+        # Apply connection-scoped pragmas that improve bulk-load throughput.
+        if not config.get("enableFastImportPragmas"):
+            return
+
+        try:
+            conn.execute("PRAGMA temp_store = MEMORY")
+            conn.execute("PRAGMA cache_size = -200000")
+            conn.execute("PRAGMA journal_mode = MEMORY")
+            conn.execute("PRAGMA synchronous = OFF")
+        except Exception as ex:
+            tlogger.warning(f"Unable to apply fast import pragmas: {format(ex)}")
+
+    @staticmethod
+    def _deleteAreasymbolsBulk(database: str, areasymbols) -> Tuple[bool, str, str]:
+        # Delete all target areasymbols in one transaction to minimize connection and commit overhead.
+        uniqueSymbols = []
+        seen = set()
+        for symbol in (areasymbols or []):
+            value = str(symbol or "").strip()
+            if not value:
+                continue
+            lowered = value.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            uniqueSymbols.append(value)
+
+        if not uniqueSymbols:
+            return (True, "No areasymbols to delete", "")
+
+        retryAttempts = 3
+        retryDelaySeconds = 0.4
+
+        for attempt in range(1, retryAttempts + 1):
+            (status, conn, errormessage) = DlUtilities.create_connection(database)
+            if not status:
+                return (False, "", errormessage)
+
+            try:
+                dataloader._applyFastImportPragmas(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                conn.executemany(
+                    "DELETE FROM sacatalog WHERE lower(areasymbol) = lower(?)",
+                    [(symbol,) for symbol in uniqueSymbols]
+                )
+                conn.commit()
+                return (True, f"Deleted {len(uniqueSymbols)} areasymbol records before import", "")
+            except Exception as ex:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
+                exText = str(ex).lower()
+                isLocked = ("database is locked" in exText) or ("database table is locked" in exText) or ("database schema is locked" in exText)
+                if isLocked and attempt < retryAttempts:
+                    tlogger.warning(f"Bulk delete hit SQLite lock (attempt {attempt}/{retryAttempts}); retrying...")
+                    time.sleep(retryDelaySeconds * attempt)
+                    continue
+
+                return (False, "", f"Error deleting existing areasymbols before import: {format(ex)}")
+            finally:
+                conn.close()
+
+        return (False, "", "Error deleting existing areasymbols before import: database remained locked after retries")
+
+    _TABULAR_IMPORT_PLAN_CACHE: Dict[str, List[Dict[str, object]]] = {}
+    _SDV_SIGNATURE_CACHE: Dict[str, Set[str]] = {}
+    _SDV_SIGNATURE_FILES = (
+        "sdvattribute.txt",
+        "sdvfolder.txt",
+        "sdvfolderattribute.txt",
+        "sdvalgorithm.txt",
+    )
+    _DEFAULT_TABULAR_INSERT_CHUNK_SIZE = 4000
+
+    QUICK_PRETEST_DETAIL_LIMIT = 400
+    QUICK_PRETEST_INDEX_ONLY_LIMIT = 1000
+
+    @staticmethod
+    def _getDatabaseCacheKey(database: str) -> str:
+        return os.path.abspath(database).lower()
+
+    @staticmethod
+    def _getTabularInsertChunkSize() -> int:
+        try:
+            configuredChunkSize = int(config.get("tabularInsertChunkSize"))
+            if configuredChunkSize > 0:
+                return configuredChunkSize
+        except Exception:
+            pass
+
+        return dataloader._DEFAULT_TABULAR_INSERT_CHUNK_SIZE
+
+    @staticmethod
+    def _getTabularImportPlan(tbcon: sqlite3.Connection, db_file: str) -> List[Dict[str, object]]:
+        cacheKey = dataloader._getDatabaseCacheKey(db_file)
+        cachedPlan = dataloader._TABULAR_IMPORT_PLAN_CACHE.get(cacheKey)
+        if cachedPlan is not None:
+            return cachedPlan
+
+        cursor = tbcon.cursor()
+        cursor.execute("SELECT daglevel,tabphyname,iefilename,tabletype from mdstattabs where tabletype in ('Tabular in Tabular') order by daglevel")
+        tblist = cursor.fetchall()
+
+        plan: List[Dict[str, object]] = []
+        for rw in tblist:
+            tableName = str(rw[1])
+            fileName = str(rw[2])
+
+            queryFieldNames = f"SELECT name FROM PRAGMA_TABLE_INFO('{tableName}');"
+            cursor.execute(queryFieldNames)
+            tableColumns = cursor.fetchall()
+
+            usecols = None
+            columnCount = len(tableColumns)
+            if tableName == 'cointerp':
+                usecols = (0, 1, 2, 3, 4, 5, 6, 11, 12, 15, 16, 17, 18)
+                columnCount = len(usecols)
+
+            insertQuery = "INSERT INTO " + tableName + " VALUES (" + ",".join(['?'] * columnCount) + ");"
+            plan.append({
+                "tablename": tableName,
+                "filename": fileName,
+                "columncount": columnCount,
+                "insertquery": insertQuery,
+                "iscointerp": tableName == 'cointerp',
+                "usecols": usecols,
+            })
+
+        cursor.close()
+        dataloader._TABULAR_IMPORT_PLAN_CACHE[cacheKey] = plan
+        return plan
+
+    @staticmethod
+    def _buildSdvSignature(data_file: str) -> Optional[str]:
+        tabularFolder = os.path.join(data_file, 'tabular')
+        signatureParts = []
+
+        try:
+            for filename in dataloader._SDV_SIGNATURE_FILES:
+                filePath = os.path.join(tabularFolder, filename)
+                if not os.path.isfile(filePath):
+                    return None
+
+                fileStat = os.stat(filePath)
+                signatureParts.append(f"{filename}:{fileStat.st_size}:{fileStat.st_mtime_ns}")
+        except Exception:
+            return None
+
+        return "|".join(signatureParts)
+
+    @staticmethod
+    def _hasSdvRows(tbcon: sqlite3.Connection) -> bool:
+        cursor = None
+        try:
+            cursor = tbcon.cursor()
+            cursor.execute("SELECT 1 FROM sdvattribute LIMIT 1")
+            return cursor.fetchone() is not None
+        except Exception:
+            return False
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def _shouldLoadSdvTables(db_file: str, data_file: str, tbcon: sqlite3.Connection, importOptimizerProfile: str = "balanced") -> bool:
+        if not config.get("enableSdvSignatureCache"):
+            return True
+
+        signature = dataloader._buildSdvSignature(data_file)
+        if not signature:
+            return True
+
+        cacheKey = dataloader._getDatabaseCacheKey(db_file)
+        loadedSignatures = dataloader._SDV_SIGNATURE_CACHE.setdefault(cacheKey, set())
+
+        if signature in loadedSignatures:
+            if dataloader._hasSdvRows(tbcon):
+                return False
+            # The database path was reused for a new/empty DB. Clear stale signature state.
+            loadedSignatures.clear()
+
+        loadedSignatures.add(signature)
+
+        maxSignatureCount = 24 if importOptimizerProfile == "national" else 64
+        if len(loadedSignatures) > maxSignatureCount:
+            dataloader._SDV_SIGNATURE_CACHE[cacheKey] = {signature}
+
+        return True
+
+    @staticmethod
     def _shouldSkipAutoDiscoveredFolder(name: str) -> bool:
         """Return True when a child folder is clearly not an import candidate."""
         if not name:
@@ -76,6 +270,142 @@ class dataloader:
 
         # Hidden and metadata folders from user home/profile roots should not be pretest candidates.
         return name.startswith('.') or name.startswith('__')
+
+    @staticmethod
+    def _loadPretestDatabaseMetadata(database: str) -> Tuple[bool, Dict[str, str], str, str]:
+        """Load DB metadata once for quick pretest mode to avoid reconnecting for every folder."""
+        dbVersionByAreasymbol = {}
+        expectedSsurgoVersion = ""
+        tbcon = None
+
+        try:
+            (status, tbcon, errormessage) = DlUtilities.create_connection(database)
+            if not status:
+                return (False, dbVersionByAreasymbol, expectedSsurgoVersion, errormessage)
+
+            cursor = tbcon.cursor()
+            cursor.execute("SELECT areasymbol, saverest FROM sacatalog;")
+            for row in cursor.fetchall():
+                if len(row) < 2 or row[0] is None:
+                    continue
+                dbVersionByAreasymbol[str(row[0])] = "" if row[1] is None else str(row[1])
+
+            cursor.execute("SELECT value FROM systemtemplateinformation WHERE name='SSURGO Version';")
+            versionRow = cursor.fetchone()
+            if versionRow and versionRow[0] is not None:
+                expectedSsurgoVersion = str(versionRow[0])
+
+            cursor.close()
+            return (True, dbVersionByAreasymbol, expectedSsurgoVersion, "")
+        except Exception as ex:
+            errormessage = f"Error while loading pretest database metadata, unexpected error: {format(ex)}"
+            tlogger.critical(errormessage)
+            tlogger.critical(traceback.format_exc())
+            return (False, dbVersionByAreasymbol, expectedSsurgoVersion, errormessage)
+        finally:
+            if tbcon:
+                tbcon.close()
+
+    @staticmethod
+    def _getSacatalogDataFast(root: str, subfolder: str, dbVersionByAreasymbol: Dict[str, str]) -> Tuple[bool, str, str, Dict[str, Dict[str, str]]]:
+        """Read sacatlog data without opening a database connection for each folder."""
+        areasymbols = {}
+
+        try:
+            sacatalogFilename = 'sacatlog.txt'
+            filePath = os.path.join(root, subfolder, "tabular", sacatalogFilename)
+            (status, errormessage) = DlUtilities.testFileExists(filePath, f"Error in {sacatalogFilename}")
+            if not status:
+                return (False, "", errormessage, areasymbols)
+
+            with open(filePath, 'r', encoding='UTF-8', errors='ignore') as file:
+                csvreader = csv.reader(file, delimiter='|', quotechar='"')
+                for row in csvreader:
+                    if not row:
+                        continue
+
+                    areasymbol = str(row[0]).strip() if len(row) > 0 else ""
+                    if not areasymbol:
+                        continue
+
+                    details = {
+                        "areaname": str(row[1]).strip() if len(row) > 1 else "",
+                        "fileversion": str(row[3]).strip() if len(row) > 3 else "",
+                        "dbversion": dbVersionByAreasymbol.get(areasymbol, "")
+                    }
+                    areasymbols[areasymbol] = details
+
+            if len(areasymbols.keys()) == 0:
+                return (False, "", "No areasymbol found in sacatalog.txt", areasymbols)
+
+            return (True, "", "", areasymbols)
+        except Exception as ex:
+            errormessage = f"Error while executing fast getsacatalog function in {subfolder}, Unexcepted error: {format(ex)}"
+            tlogger.critical(errormessage)
+            tlogger.critical(traceback.format_exc())
+            return (False, "", errormessage, areasymbols)
+
+    @staticmethod
+    def _checkVersionFast(expectedSsurgoVersion: str, root: str, subfolder: str) -> Tuple[bool, str, str]:
+        """Version validation that reuses preloaded DB version during quick pretest."""
+        try:
+            versionfilename = 'version.txt'
+            filePath = os.path.join(root, subfolder, "tabular", versionfilename)
+            (status, errormessage) = DlUtilities.testFileExists(filePath, f"Error in {versionfilename}")
+            if not status:
+                return (False, "", errormessage)
+
+            with open(filePath, 'r', encoding='UTF-8', errors='ignore') as file:
+                tbversion = (file.read().splitlines())[0]
+
+            if not expectedSsurgoVersion or expectedSsurgoVersion == tbversion:
+                return (True, "", "")
+
+            return (False, "", f"SSURGO version {tbversion} doesn't match database version {expectedSsurgoVersion}")
+        except Exception as ex:
+            errormessage = f"Error while executing fast checkVersion function in {subfolder}, Unexcepted error: {format(ex)}"
+            tlogger.critical(errormessage)
+            tlogger.critical(traceback.format_exc())
+            return (False, "", errormessage)
+
+    @staticmethod
+    def _buildQuickPretestPlaceholderAreasymbols(subfolder: str) -> Dict[str, Dict[str, str]]:
+        """Build a lightweight placeholder areasymbol record so UI can render immediately."""
+        folderName = str(subfolder or "").strip()
+        if not folderName:
+            folderName = "UNKNOWN"
+
+        match = re.search(r'\b([A-Za-z]{2}\d{3}|US)\b', folderName, re.IGNORECASE)
+        if match:
+            areasymbol = match.group(1).upper()
+        else:
+            areasymbol = re.sub(r'[^A-Za-z0-9]', '', folderName).upper()[:12] or "UNKNOWN"
+
+        return {
+            areasymbol: {
+                "areaname": folderName,
+                "fileversion": "",
+                "dbversion": ""
+            }
+        }
+
+    @staticmethod
+    def _buildIndexedQuickPretestRows(requestSubfolders):
+        """Build fast placeholder rows without per-folder file-system checks for very large quick-pretest sets."""
+        subfolders = []
+        for subfolder in requestSubfolders:
+            if dataloader._shouldSkipAutoDiscoveredFolder(subfolder):
+                continue
+
+            areasymbols = dataloader._buildQuickPretestPlaceholderAreasymbols(subfolder)
+            subfolders.append({
+                "childfoldername": subfolder,
+                "preteststatus": True,
+                "errormessage": "",
+                "areasymbols": areasymbols,
+            })
+
+        return subfolders
 
     @staticmethod
     def setcsvfieldsizelimit():
@@ -98,11 +428,18 @@ class dataloader:
         try:
             sacatalogFilename = 'sacatlog.txt'
             filePath = os.path.join(root, subfolder, "tabular", sacatalogFilename)
-            areasymbols = {} 
+            areasymbols = {}
+            tbcon = None
+            cursor = None
             (status, errormessage) = DlUtilities.testFileExists(filePath, f"Error in {sacatalogFilename}")
             if not status: return (False, "", errormessage, areasymbols)
-            (status, tbcon, errormessage) = DlUtilities.create_connection(database)
-            if not status: return  (status, "Error encountered.", errormessage, areasymbols)
+
+            if getDbversion:
+                (status, tbcon, errormessage) = DlUtilities.create_connection(database)
+                if not status:
+                    return (status, "Error encountered.", errormessage, areasymbols)
+                cursor = tbcon.cursor()
+
             with open(filePath, 'r', encoding='UTF-8', errors='ignore') as file:
                 csvreader = csv.reader(file, delimiter='|', quotechar='"')
                 for row in csvreader:
@@ -111,9 +448,8 @@ class dataloader:
                     details["fileversion"] = str(row[3])
 
                     if getDbversion:
-                        saverestquery = f"SELECT saverest from sacatalog where areasymbol = '{str(row[0])}';"
-                        cursor = tbcon.cursor()
-                        cursor.execute(saverestquery)
+                        saverestquery = "SELECT saverest from sacatalog where areasymbol = ?;"
+                        cursor.execute(saverestquery, (str(row[0]),))
                         saverest = cursor.fetchone()
                         if saverest is None:
                             saverest = ""
@@ -121,8 +457,6 @@ class dataloader:
                             saverest = saverest[0]
                         details["dbversion"] = saverest
                     areasymbols[str(row[0])] = details
-            if not tbcon:
-                tbcon.close()
 
             if len(areasymbols.keys())==0:
                 return (False, "", "No areasymbol found in sacatalog.txt", areasymbols)
@@ -134,6 +468,11 @@ class dataloader:
             tlogger.critical(errormessage)
             tlogger.critical(traceback.format_exc())
             return (False, "", errormessage, areasymbols)
+        finally:
+            if cursor:
+                cursor.close()
+            if tbcon:
+                tbcon.close()
     
 
     def checkTabularfolderpath(root: str, subfolder: str) -> Tuple[bool, str, str]:
@@ -628,43 +967,87 @@ class dataloader:
                     # case: we have a folder
                     requestSubfolders.append(name)
         
-        dataloader.setcsvfieldsizelimit()
-        
         istabularonly = request["istabularonly"]
+        quickPretest = bool(request.get("quickpretest", True))
+        detailedQuickPretest = quickPretest and len(requestSubfolders) <= dataloader.QUICK_PRETEST_DETAIL_LIMIT
+        indexedQuickPretest = quickPretest and len(requestSubfolders) > dataloader.QUICK_PRETEST_INDEX_ONLY_LIMIT
+
+        if not indexedQuickPretest:
+            dataloader.setcsvfieldsizelimit()
+
+        dbVersionByAreasymbol = {}
+        expectedSsurgoVersion = ""
+
+        if detailedQuickPretest:
+            (status, dbVersionByAreasymbol, expectedSsurgoVersion, errormessage) = dataloader._loadPretestDatabaseMetadata(database)
+            if not status:
+                return {"status": False, "message": f"Error loading pretest metadata from database {database}", "errormessage": errormessage}
+
         subfolders = []
         isValidPretest = True
+
+        if indexedQuickPretest:
+            tlogger.info(f"Quick pretest indexed mode enabled for {len(requestSubfolders)} folders")
+            subfolders = dataloader._buildIndexedQuickPretestRows(requestSubfolders)
+            requestSubfolders = []
 
         for subfolder in requestSubfolders:
             if dataloader._shouldSkipAutoDiscoveredFolder(subfolder):
                 continue
 
-            (status, message, errormessage) = dataloader.checkTabularfolderpath(root, subfolder)         
+            if quickPretest and not detailedQuickPretest:
+                tabularPath = os.path.join(root, subfolder, "tabular")
+                status = os.path.isdir(tabularPath)
+                message = ""
+                errormessage = "" if status else f"tabular folder is either invalid (case sensitive, lower case required) or missing in folder {subfolder}"
+            else:
+                (status, message, errormessage) = dataloader.checkTabularfolderpath(root, subfolder)
             if not status:
                 isValidPretest = status 
                 subfolders.append({"childfoldername":subfolder, "preteststatus":status , "errormessage":errormessage, "areasymbols":""})
                 continue
 
             if not istabularonly:
-                (status, message, errormessage) = dataloader.checkSpatialfolderpath(root, subfolder)
+                if quickPretest and not detailedQuickPretest:
+                    spatialPath = os.path.join(root, subfolder, "spatial")
+                    status = os.path.isdir(spatialPath)
+                    message = ""
+                    errormessage = "" if status else f"spatial folder is either invalid (case sensitive, lower case required) or missing in folder {subfolder}"
+                else:
+                    (status, message, errormessage) = dataloader.checkSpatialfolderpath(root, subfolder)
                 if not status:
                     isValidPretest = status 
                     subfolders.append({"childfoldername":subfolder, "preteststatus":status , "errormessage":errormessage, "areasymbols":""})
                     continue
 
-            (status, message, errormessage, areasymbols) = dataloader.getSacatalogData(database, root, subfolder, True)
+            if quickPretest and not detailedQuickPretest:
+                areasymbols = dataloader._buildQuickPretestPlaceholderAreasymbols(subfolder)
+                status = True
+                message = ""
+                errormessage = ""
+            elif quickPretest:
+                (status, message, errormessage, areasymbols) = dataloader._getSacatalogDataFast(root, subfolder, dbVersionByAreasymbol)
+            else:
+                (status, message, errormessage, areasymbols) = dataloader.getSacatalogData(database, root, subfolder, True)
             if not status:
                 isValidPretest = status 
                 subfolders.append({"childfoldername":subfolder, "preteststatus":status , "errormessage":errormessage, "areasymbols":areasymbols})
                 continue
             
-
-            (status, message, errormessage) = dataloader.checkVersion(database, root, subfolder)
+            if quickPretest and not detailedQuickPretest:
+                status = True
+                message = ""
+                errormessage = ""
+            elif quickPretest:
+                (status, message, errormessage) = dataloader._checkVersionFast(expectedSsurgoVersion, root, subfolder)
+            else:
+                (status, message, errormessage) = dataloader.checkVersion(database, root, subfolder)
             if not status:
                 isValidPretest = status 
                 subfolders.append({"childfoldername":subfolder, "preteststatus":status , "errormessage":errormessage, "areasymbols":areasymbols})
                 continue
 
-            if not istabularonly:
+            if not istabularonly and not quickPretest:
                 ssurgoSource = 'standardSSurgo'
                 ssurgoDownloadRoot = os.path.join(root, subfolder)
                 saaoifilename = 'aoi_a_aoi.shp'   #
@@ -693,33 +1076,30 @@ class dataloader:
                     isValidPretest = status 
                     subfolders.append({"childfoldername": subfolder,"preteststatus":status , "errormessage":errormessage,"areasymbols":areasymbols})
                     continue
-                subfolders.append({"childfoldername": subfolder,"preteststatus": status , "errormessage":errormessage,"areasymbols":areasymbols})
 
-            else:
-                subfolders.append({"childfoldername": subfolder,"preteststatus": status , "errormessage":errormessage,"areasymbols":areasymbols})
+            subfolders.append({"childfoldername": subfolder,"preteststatus": status , "errormessage":errormessage,"areasymbols":areasymbols})
 
         # Code logic for cross scanning of duplicate areasymbols using the folders with preteststatus = True
                 
         filteredSubfolders = [subfolder for subfolder in subfolders if subfolder['preteststatus']]
 
+        areaSymbolFolderMap = {}
+        for subfolder in filteredSubfolders:
+            for areasymbol in subfolder['areasymbols']:
+                if areasymbol not in areaSymbolFolderMap:
+                    areaSymbolFolderMap[areasymbol] = []
+                areaSymbolFolderMap[areasymbol].append(subfolder['childfoldername'])
+
         for subfolder in filteredSubfolders:
             sharedSSAs = {}
-            # cross-overs
             for areasymbol in subfolder['areasymbols']:
-                # Add data source to json response
-                if areasymbol == 'US':
-                    subfolder['datasource'] = 'STATSGO2'
-                else:
-                    subfolder['datasource'] = 'SSURGO'
-                sharedFolders = []
-                for otherSubfolder in filteredSubfolders:
-                # Don't include our outer folder name in the innermost lists
-                    if otherSubfolder['childfoldername'] != subfolder['childfoldername']:
-                        if areasymbol in otherSubfolder['areasymbols']:
-                            sharedFolders.append(otherSubfolder['childfoldername'])
+                subfolder['datasource'] = 'STATSGO2' if areasymbol == 'US' else 'SSURGO'
+                sharedFolders = [
+                    folderName for folderName in areaSymbolFolderMap.get(areasymbol, [])
+                    if folderName != subfolder['childfoldername']
+                ]
                 if sharedFolders:
-                    sharedSSAs[areasymbol]=sharedFolders
-                    # Only preserve results if any shared SSAs were found
+                    sharedSSAs[areasymbol] = sharedFolders
             if sharedSSAs:
                 subfolder['sharedSSAs'] = sharedSSAs
         
@@ -735,6 +1115,8 @@ class dataloader:
                 "status": True,
                 "message":"",
                 "errormessage": "", 
+            "quickpretest": quickPretest,
+            "quickpretestmode": "indexed" if indexedQuickPretest else "detailed" if detailedQuickPretest else "placeholder" if quickPretest else "full",
                 "subfolders": subfolders   
             }
 
@@ -814,87 +1196,85 @@ class dataloader:
     #         if con:
     #             con.close()
     
-    def importtabulardata(db_file: str, data_file: str, IncludeInterpretationSubRules: bool) -> Tuple[bool, str, str]:
+    def importtabulardata(db_file: str, data_file: str, IncludeInterpretationSubRules: bool, importOptimizerProfile: str = "balanced") -> Tuple[bool, str, str]:
         #usage (status, message, errormessage)= dataloader.importtabulardata (database, ssurgoDownloadRoot)
+        tbcon = None
+        tbfilepath = ""
         try:
             (status, tbcon, errormessage) = DlUtilities.create_connection(db_file)
             if not status:
                 return  (status, "Error encountered.", errormessage)
             tbcon.execute("PRAGMA foreign_keys = 1")
+            dataloader._applyFastImportPragmas(tbcon)
             cursor = tbcon.cursor()
-            cursor.execute("SELECT daglevel,tabphyname,iefilename,tabletype from mdstattabs where tabletype in ('Tabular in Tabular') order by daglevel")
-            tblist = cursor.fetchall()
+            tabularPlan = dataloader._getTabularImportPlan(tbcon, db_file)
+            insertChunkSize = dataloader._getTabularInsertChunkSize()
+            tbfolderpath = os.path.join(data_file, 'tabular')
 
-            for rw in tblist:
-                curValues = []
-                queryFieldNames = "SELECT name FROM PRAGMA_TABLE_INFO('" + str(rw[1])  + "');" 
-                cursor.execute(queryFieldNames)   
-                rows = cursor.fetchall()
-                src = len(rows) * ['?']
-                tbfolderpath = os.path.join(data_file,'tabular')
-                tbfilename = str(rw[2])+".txt"
-                tbfilepath = os.path.join(tbfolderpath,str(rw[2])+".txt")
+            for tablePlan in tabularPlan:
+                tableName = str(tablePlan["tablename"])
+                fileName = str(tablePlan["filename"])
+                columnCount = int(tablePlan["columncount"])
+                insertQuery = str(tablePlan["insertquery"])
+                isCointerp = bool(tablePlan["iscointerp"])
+                cointerpUsecols = tablePlan["usecols"] if isCointerp else None
+
+                tbfilepath = os.path.join(tbfolderpath, fileName + ".txt")
                 (status, errormessage) = DlUtilities.testFileExists(tbfilepath, "Tabular file error")
                 if not status: return (False, '', errormessage)
-                
-                #if str(rw[1]) == 'cointerp':
-                #    na_values = ["","NULL","null"]
-                #    f = pd.read_csv(tbfilepath,delimiter = '|',header=None, usecols=[0,1,2,3,4,5,6,11,12,15,16,17,18],names = ["cokey", "mrulekey", \
-                #        "mrulename","seqnum","rulekey","rulename","ruledepth","interphr","interphrc","nullpropdatabool","defpropdatabool","incpropdatabool", \
-                #        "cointerpkey"],na_values=na_values,keep_default_na=False,low_memory=False)
-                #    newf = f[f.ruledepth==0]
-                #    newf.to_sql(str(rw[1]), tbcon, if_exists='append',index=False)
 
-                with open(tbfilepath,'r',  encoding='UTF-8', errors='ignore') as datafile:
+                curValues = []
+                with open(tbfilepath,'r', encoding='UTF-8', errors='ignore') as datafile:
                     filerows = csv.reader(datafile, delimiter='|', quotechar='"')
-                    if str(rw[1]) == 'cointerp':
-
-                        usecols = [0,1,2,3,4,5,6,11,12,15,16,17,18]
-                        src = len(usecols) * ['?']
+                    if isCointerp:
                         if not IncludeInterpretationSubRules: #Apply ruledepth filter if IncludeInterpretationSubRules is not selected
                             for filerow in filerows:
-                                rwlst = []
-                                if filerow[6] != '0':  
+                                if len(filerow) <= 6 or filerow[6] != '0':
                                     continue
-                                for i,val in enumerate(filerow):
-                                    if i in usecols:
-                                        if val.strip():
-                                            rwlst.append(val.strip())
-                                        else:
-                                            rwlst.append(None)
-                                    else:
-                                        continue
-                                curValues.append(tuple(rwlst))
+                                rowValues = []
+                                for columnIndex in cointerpUsecols:
+                                    value = filerow[columnIndex] if columnIndex < len(filerow) else ""
+                                    rowValues.append(value.strip() if value and value.strip() else None)
+                                curValues.append(tuple(rowValues))
+                                if len(curValues) >= insertChunkSize:
+                                    cursor.executemany(insertQuery, curValues)
+                                    curValues.clear()
 
                         else:
                             for filerow in filerows:
-                                rwlst = []
-                                for i,val in enumerate(filerow):
-                                    if i in usecols:
-                                        if val.strip():
-                                            rwlst.append(val.strip())
-                                        else:
-                                            rwlst.append(None)
-                                    else:
-                                        continue
-                                curValues.append(tuple(rwlst))
-                        insertQuery = "INSERT INTO " + str(rw[1]) + " VALUES (" + ",".join(src) + ");"
-                        cursor.executemany(insertQuery, curValues)
-                        tbcon.commit()
+                                rowValues = []
+                                for columnIndex in cointerpUsecols:
+                                    value = filerow[columnIndex] if columnIndex < len(filerow) else ""
+                                    rowValues.append(value.strip() if value and value.strip() else None)
+                                curValues.append(tuple(rowValues))
+                                if len(curValues) >= insertChunkSize:
+                                    cursor.executemany(insertQuery, curValues)
+                                    curValues.clear()
 
 
                     else:                                 #Load tables which are not cointerp
-
                         for filerow in filerows:
-                            curValues.append(tuple([val.strip() if val.strip() else None for val in filerow]))
-                        insertQuery = "INSERT INTO " + str(rw[1]) + " VALUES (" + ",".join(src) + ");"
-                        cursor.executemany(insertQuery, curValues)
-                        tbcon.commit()
+                            rowValues = [val.strip() if val.strip() else None for val in filerow[:columnCount]]
+                            if len(rowValues) < columnCount:
+                                rowValues.extend([None] * (columnCount - len(rowValues)))
+                            curValues.append(tuple(rowValues))
+                            if len(curValues) >= insertChunkSize:
+                                cursor.executemany(insertQuery, curValues)
+                                curValues.clear()
+
+                if curValues:
+                    cursor.executemany(insertQuery, curValues)
 
 
-            (status, response, error) = dataloader.loadSDVtables(data_file, tbcon)
-            if not status:
-                return (status, response, str(error))
+            shouldLoadSdvTables = dataloader._shouldLoadSdvTables(db_file, data_file, tbcon, importOptimizerProfile)
+            if shouldLoadSdvTables:
+                (status, response, error) = dataloader.loadSDVtables(data_file, tbcon)
+                if not status:
+                    return (status, response, str(error))
+            else:
+                tlogger.debug(f"Skipping SDV table refresh for {os.path.basename(data_file)}; source signature already loaded")
+
+            tbcon.commit()
 
             return (True,"All tabular files are loaded successfully in db file","")
             
@@ -1205,6 +1585,7 @@ class dataloader:
     def loadSDVtables(data_file: str, tbcon: sqlite3.Connection) -> Tuple[bool, str, str]:
 
         try:
+            tbfilepath = ""
             cursor = tbcon.cursor()
             cursor.execute("SELECT daglevel,tabphyname,iefilename,tabletype from mdstattabs where tabletype in ('SDV') order by daglevel")
             sdvtblist = cursor.fetchall()
@@ -1216,7 +1597,6 @@ class dataloader:
 
                 createtmptable = f"CREATE TEMP TABLE temp.{temptbname} AS select * from {sdvtbname} where 1=0;"
                 cursor.execute(createtmptable)
-                tbcon.commit()
 
                 queryFieldNames = f"SELECT name FROM PRAGMA_TABLE_INFO('{sdvtbname}');" 
                 cursor.execute(queryFieldNames)   
@@ -1235,7 +1615,6 @@ class dataloader:
                         curValues.append(tuple([val.strip() if val.strip() else None for val in filerow]))
                 insertQuery = f"INSERT INTO temp.{temptbname} VALUES (" + ",".join(src) + ");"
                 cursor.executemany(insertQuery, curValues)
-                tbcon.commit()
             
                 #iswlupdatedexist = True
                 iswlupdatedquery = f"SELECT name FROM PRAGMA_TABLE_INFO('{sdvtbname}') where name = 'wlupdated';"
@@ -1333,17 +1712,15 @@ class dataloader:
 
                 if sqldelete:
                     cursor.execute(sqldelete)
-                    tbcon.commit()  
                 if sqlupdate:
                     cursor.execute(sqlupdate)
-                    tbcon.commit()  
                 if sqlinsert:  
                     cursor.execute(sqlinsert)
-                    tbcon.commit()
 
                 droptmptable = f"DROP TABLE IF EXISTS temp.{temptbname};"
                 cursor.execute(droptmptable)
-                tbcon.commit()
+
+            tbcon.commit()
 
             return (True,"SDV tables loaded successfully","")
         
@@ -1369,6 +1746,7 @@ class dataloader:
         try:
             (status, tbcon, errormessage) = DlUtilities.create_connection(db_file)
             if not status: return  (status, "", errormessage)
+            dataloader._applyFastImportPragmas(tbcon)
             cursor = tbcon.cursor()
             cursor.execute("SELECT daglevel,tabphyname,iefilename,iefilenameaoi,tabletype from mdstattabs where tabletype in ('Tabular in Spatial') order by daglevel")
             tblist = cursor.fetchall()
@@ -1394,7 +1772,8 @@ class dataloader:
                         curValues.append(tuple([val.strip() if val.strip() else None for val in filerow]))
                 insertQuery = "INSERT INTO " + str(rw[1]) + " VALUES (" + ",".join(src) + ");"
                 cursor.executemany(insertQuery, curValues)
-                tbcon.commit()
+
+            tbcon.commit()
 
             return (True,f"All tabular in spatial files in folder {tbinspfolderpath} are loaded successfully in db file","")
 
@@ -1933,6 +2312,13 @@ class dataloader:
             IncludeInterpretationSubRules = request["includeinterpretationsubrules"]
         else:
             IncludeInterpretationSubRules = False
+
+        performHousekeeping = bool(request.get("performhousekeeping", True))
+        importOptimizerProfile = str(request.get("importoptimizerprofile", "balanced")).strip().lower()
+        if importOptimizerProfile not in ("balanced", "national"):
+            importOptimizerProfile = "balanced"
+
+        updateMbrThisBatch = bool(request.get("updatembrthisbatch", performHousekeeping))
         
         subfolders = []
         cdict = {}
@@ -1963,6 +2349,21 @@ class dataloader:
                 for children in pretestresponse["subfolders"]:
                     cdict[children["childfoldername"]] = children["areasymbols"]
 
+        # Aggressive speed path: clear all selected areas in one DB transaction.
+        areasymbolsToDelete = []
+        for _, areasymbolMap in cdict.items():
+            areasymbolsToDelete.extend(list((areasymbolMap or {}).keys()))
+        (status, message, errormessage) = dataloader._deleteAreasymbolsBulk(database, areasymbolsToDelete)
+        if not status:
+            response = {
+                "allimported": status,
+                "status": status,
+                "message": "Failed while clearing existing data for selected areas.",
+                "errormessage": errormessage,
+                "subfolders": subfolders
+            }
+            return response
+
         
         # Do we perform the mupolygon dissolve on mukey value?
         dissolvemupolygon               = request["dissolvemupolygon"]
@@ -1977,8 +2378,13 @@ class dataloader:
             response["errormessage"] = errormessage
             response["status"] = False
             return response
-        
-        getMbr = (isGeopackageTrue and not istabularonly)
+
+        tlogger.debug(
+            f"importCandidates profile={importOptimizerProfile}, folders={len(requestSubfolders)}, "
+            f"housekeeping={performHousekeeping}, updateMbrThisBatch={updateMbrThisBatch}"
+        )
+
+        getMbr = (isGeopackageTrue and not istabularonly and updateMbrThisBatch)
         (status, errormessage, sortedSubfolders, minXaggregated, maxXaggregated, minYaggregated, maxYaggregated) = \
             dataloader.getSpatialSummary(request, getMbr, cdict)
         if not status:
@@ -1999,43 +2405,35 @@ class dataloader:
 
             tlogger.debug(f'Starting import of subfolder {requestSubfolder}')
 
-            (status, message, errormessage, areasymbols) = dataloader.getSacatalogData(database, root, requestSubfolder, False)
-            if not status:
-                subfolders.append({"childfoldername": requestSubfolder,"elapsedsecondstabularimport": time_elapsed_tabular , "elapsedsecondsspatialimport":time_elapsed_spatial, "errormessage":errormessage, "areasymbols":areasymbols})
-                response = {
-                    "allimported":status,
-                    "status": status,
-                    "message":message,
-                    "errormessage": errormessage,                  
-                    "subfolders": subfolders
-                    }
-                return response 
-            else:
-                (status, connection, errormessage) = DlUtilities.create_connection(database)
+            message = ""
+            errormessage = ""
+            areasymbols = cdict.get(requestSubfolder, {})
+            if not areasymbols:
+                (status, message, errormessage, areasymbols) = dataloader.getSacatalogData(database, root, requestSubfolder, False)
                 if not status:
                     subfolders.append({"childfoldername": requestSubfolder,"elapsedsecondstabularimport": time_elapsed_tabular , "elapsedsecondsspatialimport":time_elapsed_spatial, "errormessage":errormessage, "areasymbols":areasymbols})
                     response = {
                         "allimported":status,
                         "status": status,
                         "message":message,
-                        "errormessage": errormessage,        
+                        "errormessage": errormessage,
                         "subfolders": subfolders
                         }
-                    if connection: connection.close()
-                    return response 
-                for areasymbol in areasymbols:
-                    (status, message, errormessage) = DlUtilities.deleteAreasymbol(database, areasymbol, connection)
-                    if not status:
-                        response = {
-                            "allimported":status,
-                            "status": status,
-                            "message":message,
-                            "errormessage": errormessage,                  
-                            "subfolders": subfolders
-                            }
-                        if connection: connection.close()
-                        return response
-                if connection: connection.close()
+                    return response
+
+            # Fallback delete path for folders that were not preloaded in cdict.
+            if requestSubfolder not in cdict:
+                (status, message, errormessage) = dataloader._deleteAreasymbolsBulk(database, list((areasymbols or {}).keys()))
+                if not status:
+                    subfolders.append({"childfoldername": requestSubfolder,"elapsedsecondstabularimport": time_elapsed_tabular , "elapsedsecondsspatialimport":time_elapsed_spatial, "errormessage":errormessage, "areasymbols":areasymbols})
+                    response = {
+                        "allimported":status,
+                        "status": status,
+                        "message":"Failed while clearing existing data for this folder.",
+                        "errormessage": errormessage,
+                        "subfolders": subfolders
+                        }
+                    return response
 
             ssurgoDownloadRoot = os.path.join(root, requestSubfolder) 
             ssurgoSource = 'standardSSurgo'
@@ -2056,7 +2454,12 @@ class dataloader:
             areasym = list(areasymbols.keys())[0].lower()
 
             start_time_tabular = time.time()
-            (status, message, errormessage)= dataloader.importtabulardata (database, ssurgoDownloadRoot, IncludeInterpretationSubRules)
+            (status, message, errormessage)= dataloader.importtabulardata(
+                database,
+                ssurgoDownloadRoot,
+                IncludeInterpretationSubRules,
+                importOptimizerProfile,
+            )
             end_time_tabular = time.time()
             time_elapsed_tabular = round(end_time_tabular - start_time_tabular)
  
@@ -2099,27 +2502,29 @@ class dataloader:
 
         # We have finished iterating through the import folders.
         # We need to perform housekeeping and remove sdvfolderattribute and sdvfolder records.
-        # Remove parent table records 
-        (status, connection, errormessage) = DlUtilities.create_connection(database)
-        if not status:
-            response = {
-                "allimported":False,
-                "status": status,
-                "message":message,
-                "errormessage": errormessage,        
-                "subfolders": subfolders
-                }
-            if connection: connection.close()
-            return response                 
+        # Remove parent table records
+        if performHousekeeping:
+            (status, connection, errormessage) = DlUtilities.create_connection(database)
+            if not status:
+                response = {
+                    "allimported":False,
+                    "status": status,
+                    "message":message,
+                    "errormessage": errormessage,
+                    "subfolders": subfolders
+                    }
+                if connection: connection.close()
+                return response
+            else:
+                sqlRemoveFArecords = 'DELETE FROM sdvfolderattribute WHERE attributekey NOT IN (SELECT attributekey FROM sdvattribute)'
+                connection.execute(sqlRemoveFArecords)
+                sqlRemoveFrecords = 'DELETE FROM sdvfolder WHERE folderkey NOT IN (SELECT folderkey FROM sdvfolderattribute)'
+                connection.execute(sqlRemoveFrecords)
+                connection.commit()
+                connection.close()
+                tlogger.debug('SDV* housekeeping: finished')
         else:
-            sqlRemoveFArecords = 'DELETE FROM sdvfolderattribute WHERE attributekey NOT IN (SELECT attributekey FROM sdvattribute)'
-            connection.execute(sqlRemoveFArecords)
-            connection.commit()
-            sqlRemoveFrecords = 'DELETE FROM sdvfolder WHERE folderkey NOT IN (SELECT folderkey FROM sdvfolderattribute)'
-            connection.execute(sqlRemoveFrecords)
-            connection.commit()
-            connection.close()
-            tlogger.debug('SDV* housekeeping: finished')
+            tlogger.debug('SDV* housekeeping: skipped for intermediate batch')
     
         response = {
                 "allimported":True,

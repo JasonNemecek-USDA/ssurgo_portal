@@ -1,0 +1,22 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "windows": "powershell -NoProfile -Command \"$msg='Address user as Jason. For runtime tasks launch external CMD logging and external browser first. Keep CHANGELOG and task markdown continuously updated. If repeated friction appears, run /chronicle improve.'; @{systemMessage=$msg} | ConvertTo-Json -Compress\"",
+        "linux": "printf '%s' '{\"systemMessage\":\"Address user as Jason. For runtime tasks launch external CMD logging and external browser first. Keep CHANGELOG and task markdown continuously updated. If repeated friction appears, run /chronicle improve.\"}'",
+        "osx": "printf '%s' '{\"systemMessage\":\"Address user as Jason. For runtime tasks launch external CMD logging and external browser first. Keep CHANGELOG and task markdown continuously updated. If repeated friction appears, run /chronicle improve.\"}'",
+        "timeout": 10
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "windows": "powershell -NoProfile -Command \"$msg='Before ending: verify documentation updates (CHANGELOG + task markdown) and note any pain points for next session.'; @{systemMessage=$msg} | ConvertTo-Json -Compress\"",
+        "linux": "printf '%s' '{\"systemMessage\":\"Before ending: verify documentation updates (CHANGELOG + task markdown) and note any pain points for next session.\"}'",
+        "osx": "printf '%s' '{\"systemMessage\":\"Before ending: verify documentation updates (CHANGELOG + task markdown) and note any pain points for next session.\"}'",
+        "timeout": 10
+      }
+    ]
+  }
+}

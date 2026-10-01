@@ -5,8 +5,9 @@ export const showSdvResultsFlag = false;
 export const enableShapefileDownload = false;
 export const enableSsaVersionCheck = true;
 
-export const url = 'http://localhost:8083/SSURGOPortalUI'
-export const fileCheckUrl = 'http://localhost:8083/fileExists'
+// Keep API calls same-origin so UI works on both localhost and [::1] without CORS preflight overhead.
+export const url = '/SSURGOPortalUI'
+export const fileCheckUrl = '/fileExists'
 //Database Inventory Table Constants
 export const dbTableId = 'databaseTable'
 export const dbTableContainer = 'dbTableContainer'

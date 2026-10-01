@@ -79,7 +79,11 @@ class DlUtilities:
         try:
             if not os.path.exists(db_file):
                 return (False, None, f"Database file {db_file} not found")    
-            conn = sqlite3.connect(db_file)
+            connectTimeout = int(config.get("sqliteConnectTimeoutSeconds")) if "sqliteConnectTimeoutSeconds" in config.dynamic_config else 60
+            busyTimeoutMs = int(config.get("sqliteBusyTimeoutMs")) if "sqliteBusyTimeoutMs" in config.dynamic_config else 60000
+
+            conn = sqlite3.connect(db_file, timeout=connectTimeout)
+            conn.execute(f"PRAGMA busy_timeout = {busyTimeoutMs}")
             conn.execute("PRAGMA foreign_keys = ON")
             return (True, conn, "")
         except BaseException as e:
@@ -147,19 +151,24 @@ class DlUtilities:
                         thisNode["type"] = "File Folder"
                         thisNode["size"] = ""
                         if maxdepth:
-                            (status, childNodes, errormessage) = DlUtilities.getFolderNodes(currentPath, "", "", showfiles, maxdepth -1)
-                            if not status:
-                                return  (status, None, errormessage)
-                            if childNodes:
-                                #This logic is meant for the UI to prevent users from drilling down too far into a folder.
-                                #Currently the only filtering critera is the presence of a Tabluar folder.
-                                #In the future, more filtering criteria may need to be established.
-                                for node in childNodes:
-                                    if node["name"] == "tabular":
-                                        thisNode["containsssurgo"] = True
-                                        break
-                                    else:
-                                        thisNode["containsssurgo"] = False
+                            # Fast path used by import folder navigation (showfiles=False, maxdepth=1).
+                            # We only need to know if this folder is a SSURGO candidate, so skip recursion.
+                            if not showfiles and maxdepth == 1:
+                                thisNode["containsssurgo"] = os.path.isdir(os.path.join(currentPath, "tabular"))
+                            else:
+                                (status, childNodes, errormessage) = DlUtilities.getFolderNodes(currentPath, "", "", showfiles, maxdepth -1)
+                                if not status:
+                                    return  (status, None, errormessage)
+                                if childNodes:
+                                    #This logic is meant for the UI to prevent users from drilling down too far into a folder.
+                                    #Currently the only filtering critera is the presence of a Tabluar folder.
+                                    #In the future, more filtering criteria may need to be established.
+                                    for node in childNodes:
+                                        if node["name"] == "tabular":
+                                            thisNode["containsssurgo"] = True
+                                            break
+                                        else:
+                                            thisNode["containsssurgo"] = False
                         nodes.append(thisNode)
                 elif os.path.isfile(currentPath) and showfiles:
                     # case: we have a file

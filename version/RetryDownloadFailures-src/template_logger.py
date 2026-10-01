@@ -26,6 +26,7 @@
 # NOTSET=0, DEBUG=10, INFO=20, WARN=30, ERROR=40, and CRITICAL=50.
 
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 
 tlogger = logging.getLogger(__name__)
@@ -33,12 +34,22 @@ tlogger = logging.getLogger(__name__)
 def initializeLogger(filename, minimumLevel):
     global tlogger
 
+    # Avoid duplicate handlers when initializeLogger is called more than once
+    # in the same process.
+    if tlogger.handlers:
+        tlogger.handlers.clear()
+
     # Log to specified handler
     # The filename will get the current run mode interposed before the ".log".
     FORMATTER = logging.Formatter("%(asctime)s -- %(name)s -- %(levelname)s -- %(message)s")
     file_handler = RotatingFileHandler(filename, mode='a', maxBytes=5*1024*1024, backupCount=4) # maxBytes is set to 5MB. 1024*1024 is 1MB.
     file_handler.setFormatter(FORMATTER)
 
+    # Mirror logs to the console so launcher CMD windows show live logging.
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(FORMATTER)
+
     tlogger.addHandler(file_handler)
+    tlogger.addHandler(console_handler)
     tlogger.setLevel(minimumLevel)
     tlogger.propagate = False

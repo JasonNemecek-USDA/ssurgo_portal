@@ -209,6 +209,21 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Local SSURGO development and validation artifacts
+.snapshots/
+tmp/
+version/tmp/
+version/error_check_*/
+version/RetryDownloadFailures-src/venv311/
+version/RetryDownloadFailures-src/tmp_*/
+version/RetryDownloadFailures-src/dump_webpage.py
+version/RetryDownloadFailures-src/tmp_debug_webpage.py
+
+# Machine-specific diagnostics and ad hoc benchmark probes
+Kyle_*_Diagnostic_*/
+kyle_*.ps1
+tmp_*.ps1
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

@@ -148,7 +148,7 @@ export default class RasterFunctions{
                 //Not tested prior to 8/30/2024 "demo" version
                 const errorMessage = response && response.errormessage ? encodeURIComponent(response.errormessage.replaceAll("(", "%28").replaceAll(")", "%29").replaceAll(":", " "))
                     : "no%20response%20generating%20raster%20file"
-                fetch('http://localhost:8083/tlogger/warning:'+ errorMessage)
+                fetch('/tlogger/warning:'+ errorMessage).catch(() => {})
 
                 progressDisplayComp.progressTitle = "Raster creation failed.";
                 progressDisplayComp.progressText = "Rasters failed to be generated.";
