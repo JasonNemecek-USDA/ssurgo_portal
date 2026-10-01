@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import ApiService from '../resources/services/apiService.mjs';
+import {getNetworkDownloadConcurrencyCap} from '../resources/services/downloadConcurrency.mjs';
 
 test('blob downloads allow slow WSS archives to complete', () => {
   const service = new ApiService();
@@ -54,4 +55,10 @@ test('blob downloads retry browser TimeoutError failures', async (context) => {
     /Blob download timed out after 0 seconds/,
   );
   assert.equal(fetchAttempts, 2);
+});
+
+test('large selections cap simultaneous WSS archive transfers', () => {
+  assert.equal(getNetworkDownloadConcurrencyCap(3_379), 2);
+  assert.equal(getNetworkDownloadConcurrencyCap(500), 4);
+  assert.equal(getNetworkDownloadConcurrencyCap(99), Number.POSITIVE_INFINITY);
 });

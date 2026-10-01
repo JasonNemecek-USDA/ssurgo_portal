@@ -1,4 +1,5 @@
 import apiServiceDef from "/static/services/apiService.mjs";
+import {getNetworkDownloadConcurrencyCap} from "/static/services/downloadConcurrency.mjs";
 import pLimit from "/static/JsLibrary/pLimit/p-limit-index.js"
 var WSS_DOWNLOAD_URL
 var SDA_URL
@@ -1147,9 +1148,11 @@ async function downloadSurveyAreas(areaSymbols, destination, overwrite){
     }
 
     const profiledTargets = getProfiledConcurrencyTargets(cpuThreads, activeProfileSettings)
+    const networkConcurrencyCap = getNetworkDownloadConcurrencyCap(areaSymbols.length)
     const maxConcurrentRequests = Math.min(
         profiledTargets.pipeline,
-        Math.max(activeProfileSettings.minConcurrency.pipeline, areaSymbols.length)
+        Math.max(activeProfileSettings.minConcurrency.pipeline, areaSymbols.length),
+        networkConcurrencyCap
     )
     const maxConcurrentLocalOps = Math.min(
         profiledTargets.localIo,
@@ -1159,17 +1162,26 @@ async function downloadSurveyAreas(areaSymbols, destination, overwrite){
         profiledTargets.upload,
         maxConcurrentLocalOps
     )
-    const minPipelineConcurrency = Math.max(
-        activeProfileSettings.minConcurrency.pipeline,
-        Math.min(8, maxConcurrentRequests)
+    const minPipelineConcurrency = Math.min(
+        maxConcurrentRequests,
+        Math.max(
+            activeProfileSettings.minConcurrency.pipeline,
+            Math.min(8, maxConcurrentRequests)
+        )
     )
-    const minLocalIoConcurrency = Math.max(
-        activeProfileSettings.minConcurrency.localIo,
-        Math.min(6, maxConcurrentLocalOps)
+    const minLocalIoConcurrency = Math.min(
+        maxConcurrentLocalOps,
+        Math.max(
+            activeProfileSettings.minConcurrency.localIo,
+            Math.min(6, maxConcurrentLocalOps)
+        )
     )
-    const minUploadConcurrency = Math.max(
-        activeProfileSettings.minConcurrency.upload,
-        Math.min(2, maxConcurrentUploads)
+    const minUploadConcurrency = Math.min(
+        maxConcurrentUploads,
+        Math.max(
+            activeProfileSettings.minConcurrency.upload,
+            Math.min(2, maxConcurrentUploads)
+        )
     )
     const startUploadRatio = Number(activeProfileSettings.startUploadRatio ?? 0.75)
     const startUploadConcurrency = Math.max(

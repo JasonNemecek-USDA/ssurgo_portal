@@ -12,6 +12,10 @@ All notable changes to this project should be documented in this file.
 	- removed stale duplicate blob policies from the worker so `apiService.mjs` is the single timeout-policy owner.
 	- added Node regression coverage for exact profile timeouts, explicit overrides, and browser timeout retries.
 	- packaged `.120` validation: real `HI995` download extracted `spatial` and `tabular` data with zero retries; `3` Node tests and `44` Python tests passed; `/startUp` and `/serverStatus` returned `200`; full smoke returned `E2E_SMOKE_OK` with `IMPORT_MS=3727`.
+	- national-run follow-up caps simultaneous WSS archive transfers at `2` for 1,000+ selections and `4` for 100-999 selections, preventing dozens of large ZIP requests from starving one another before upload begins.
+	- adaptive governor floors now honor the network cap instead of scaling national runs back above it.
+	- focused timeout/concurrency regression suite now passes `4/4` tests.
+	- packaged 3,379-survey validation held at `pipeline=2`, completed and extracted `AK605` in 4:55, stopped cleanly, returned both health endpoints at `200`, and logged zero `ERROR`/`CRITICAL` events.
 - Preserve the packaged runtime's local `sapoly.geojson` when the USDA refresh endpoint is unavailable:
 	- `BulkDownloader.check_for_sapolygons()` now downloads newer polygon data to a temporary sibling and atomically replaces the known-good file only after a successful transfer.
 	- failed refreshes remove partial downloads and emit a warning instead of an application error.
